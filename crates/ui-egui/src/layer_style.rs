@@ -460,15 +460,11 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
             ui.label(RichText::new(tl!(&label)).font(crate::theme::semibold(14.0)).color(t.text));
             ui.add_space(6.0);
             let pkey = format!("p:{selected}");
+            // Only reachable through `ui.dialog.set`: say what is wrong once, keep the bad value.
             if let Some(error) = &invalid {
                 ui.colored_label(t.danger, error);
             }
             let params = f.get(&pkey).cloned().unwrap_or_else(|| defaults(&selected));
-            if !params.is_object() {
-                ui.colored_label(t.danger, format!("`{pkey}` must be an object."));
-            } else if let Some(error) = &invalid {
-                ui.weak(error);
-            }
             if let Some(mut p) = params.as_object().map(|o| Value::Object(o.clone())) {
                 for &(key, label, kind) in spec(&selected) {
                     match kind {
