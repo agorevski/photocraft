@@ -54,7 +54,7 @@ pub fn hex(c: [f32; 3]) -> String {
 
 pub fn parse_hex(s: &str) -> Option<[f32; 3]> {
     let h = s.trim().trim_start_matches('#');
-    if h.len() != 6 {
+    if h.len() != 6 || !h.is_ascii() {
         return None;
     }
     // `get`, not `[..]`: typed text may be multi-byte, and a byte range can split a character.
@@ -507,6 +507,19 @@ mod tests {
         }
         assert_eq!(hex([1.0, 0.5, 0.0]), "#ff8000");
         assert_eq!(parse_hex("#FF8000").map(hex).as_deref(), Some("#ff8000"));
+    }
+
+    #[test]
+    fn parse_hex_rejects_malformed_input_without_panicking() {
+        for input in ["€€", "gggggg", "#12345", "1234567", ""] {
+            assert_eq!(parse_hex(input), None, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn parse_hex_accepts_six_digit_hex_with_or_without_hash() {
+        assert_eq!(parse_hex("3366cc").map(hex).as_deref(), Some("#3366cc"));
+        assert_eq!(parse_hex("#3366cc").map(hex).as_deref(), Some("#3366cc"));
     }
 
     #[test]
