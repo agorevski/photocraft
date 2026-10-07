@@ -180,6 +180,7 @@ pub fn authorize_engine_command(id: &str, params: &Value) -> Result<(), Automati
                 | "layer.videoLayers.reloadFrame"
                 | "image.applyDataSet"
         )
+        || command_uses_ambient_path(id, params)
         || profile_command_may_read_ambient(id, params)
         || preferences_may_grant_ambient_paths(id, params)
         || params_contain_ambient_path(id, params)
@@ -232,14 +233,24 @@ fn preferences_may_grant_ambient_paths(id: &str, params: &Value) -> bool {
     if id != "prefs.set" {
         return false;
     }
-    let direct = params
-        .get("path")
-        .and_then(Value::as_str)
-        .is_some_and(|path| path == "colorSettings" || path.starts_with("colorSettings.") || path == "scriptEvents" || path.starts_with("scriptEvents."));
-    let batch = params.get("values").and_then(Value::as_object).is_some_and(|values| {
-        values.keys().any(|path| path == "colorSettings" || path.starts_with("colorSettings.") || path == "scriptEvents" || path.starts_with("scriptEvents."))
-    });
+    let direct = params.get("path").and_then(Value::as_str).is_some_and(preference_uses_ambient_filesystem);
+    let batch = params.get("values").and_then(Value::as_object).is_some_and(|values| values.keys().any(|path| preference_uses_ambient_filesystem(path)));
     direct || batch
+}
+
+fn preference_uses_ambient_filesystem(path: &str) -> bool {
+    let Some(section) = path.split('.').next() else { return true };
+    path.is_empty() || matches!(section, "colorSettings" | "scriptEvents" | "historyLog" | "plugIns" | "scratchDisks")
+}
+
+fn command_uses_ambient_path(id: &str, params: &Value) -> bool {
+    match id {
+        "brush.presets.importAbr" | "gradient.presets.importGrd" | "plugin.install" => {
+            params.get("data").is_none() && params.get("path").and_then(Value::as_str).is_some_and(|path| !path.trim().is_empty())
+        }
+        "plugin.reload" => true,
+        _ => false,
+    }
 }
 
 fn looks_like_path(value: &str) -> bool {
@@ -432,5 +443,65 @@ mod tests {
         assert!(authorize_engine_command("filter.distort.displace", &serde_json::json!({"mapPath": "outside.png"})).is_err());
         assert!(authorize_engine_command("layer.setAdjustment", &serde_json::json!({"file": "outside.cube"})).is_err());
         assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": "colorSettings.workingRgb", "value": "outside.icc"})).is_err());
+    }
+
+    #[test]
+    fn automation_rejects_ambient_path_commands_and_preferences() {
+        for (id, params) in [
+            ("brush.presets.importAbr", serde_json::json!({"path": "/outside/set.abr"})),
+            ("gradient.presets.importGrd", serde_json::json!({"path": "/outside/set.grd"})),
+            ("plugin.install", serde_json::json!({"path": "/outside/plugin.wasm"})),
+            ("plugin.reload", serde_json::json!({"path": "/outside/plugins"})),
+            ("plugin.reload", serde_json::json!({})),
+        ] {
+            assert!(authorize_engine_command(id, &params).is_err(), "{id}: {params}");
+        }
+        for (id, params) in [
+            ("brush.presets.importAbr", serde_json::json!({"data": "QUJD"})),
+            ("gradient.presets.importGrd", serde_json::json!({"data": "QUJD"})),
+            ("plugin.install", serde_json::json!({"data": "QUJD"})),
+        ] {
+            assert!(authorize_engine_command(id, &params).is_ok(), "{id}: {params}");
+        }
+        for path in [
+            "",
+            "colorSettings",
+            "colorSettings.workingRgb",
+            "scriptEvents",
+            "scriptEvents.enabled",
+            "historyLog.filePath",
+            "plugIns.additionalPluginsFolder",
+            "scratchDisks.disks",
+        ] {
+            assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": path, "value": {}})).is_err(), "{path}");
+        }
+        assert!(
+            authorize_engine_command("prefs.set", &serde_json::json!({"values": {"interface.language": "fr", "historyLog.filePath": "/outside/log"}})).is_err()
+        );
+        assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": "interface.language", "value": "fr"})).is_ok());
+    }
+
+    #[test]
+    fn whole_preferences_update_cannot_enable_automation_script_events() {
+        let mut headless = crate::headless::Headless::new();
+        let result = headless.command_run(
+            "prefs.set",
+            serde_json::json!({
+                "path": "",
+                "value": {
+                    "scriptEvents": {
+                        "enabled": true,
+                        "bindings": [{
+                            "event": "newDocument",
+                            "steps": [["file.saveACopy", {"path": "/outside/canary.psd"}]]
+                        }]
+                    }
+                }
+            }),
+        );
+        assert!(result.is_err());
+
+        headless.command_run("file.new", serde_json::json!({"width": 5, "height": 5})).unwrap();
+        assert!(headless.session.file_menu.event_log.is_empty());
     }
 }
