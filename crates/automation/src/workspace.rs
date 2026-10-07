@@ -240,6 +240,8 @@ fn preferences_may_grant_ambient_paths(id: &str, params: &Value) -> bool {
 }
 
 fn preference_uses_ambient_filesystem(path: &str) -> bool {
+    // The engine skips empty segments (`.scriptEvents.enabled` sets `scriptEvents.enabled`), so
+    // judge the first non-empty one; no segment at all is the whole-preferences update.
     let Some(section) = path.split('.').find(|segment| !segment.is_empty()) else { return true };
     matches!(section, "colorSettings" | "scriptEvents" | "historyLog" | "plugIns" | "scratchDisks")
 }
@@ -247,7 +249,8 @@ fn preference_uses_ambient_filesystem(path: &str) -> bool {
 fn command_uses_ambient_path(id: &str, params: &Value) -> bool {
     match id {
         "brush.presets.importAbr" | "gradient.presets.importGrd" | "plugin.install" => {
-            params.get("data").is_none() && params.get("path").and_then(Value::as_str).is_some_and(|path| !path.trim().is_empty())
+            // `data` wins over `path` in these commands; any `path` without it reads the filesystem.
+            params.get("data").is_none() && params.get("path").is_some()
         }
         "plugin.reload" => true,
         _ => false,
@@ -456,6 +459,7 @@ mod tests {
             ("plugin.install", serde_json::json!({"path": "/outside/plugin.wasm"})),
             ("plugin.reload", serde_json::json!({"path": "/outside/plugins"})),
             ("plugin.reload", serde_json::json!({})),
+            ("plugin.install", serde_json::json!({"path": " "})),
         ] {
             assert!(authorize_engine_command(id, &params).is_err(), "{id}: {params}");
         }
@@ -478,6 +482,8 @@ mod tests {
             ".historyLog.filePath",
             "plugIns.additionalPluginsFolder",
             "scratchDisks.disks",
+            ".",
+            "..historyLog.filePath",
         ] {
             assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": path, "value": {}})).is_err(), "{path}");
         }
