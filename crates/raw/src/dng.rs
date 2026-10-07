@@ -152,28 +152,28 @@ pub(crate) fn decode(t: &Tiff, limits: &Limits) -> Result<Sensor> {
     let origin = t.tag_floats(&raw, tag::DEFAULT_CROP_ORIGIN);
     let size = t.tag_floats(&raw, tag::DEFAULT_CROP_SIZE);
     if raw.has(tag::DEFAULT_CROP_ORIGIN) || raw.has(tag::DEFAULT_CROP_SIZE) {
-        let ([ox, oy], [cw, ch]) = (origin.as_slice(), size.as_slice()) else {
-            return Err(RawError::malformed("DNG default crop must have two origin and size values"));
-        };
-        let (ox, oy, cw, ch) = (
-            crop_value(*ox, "DefaultCropOrigin"),
-            crop_value(*oy, "DefaultCropOrigin"),
-            crop_value(*cw, "DefaultCropSize"),
-            crop_value(*ch, "DefaultCropSize"),
-        );
-        let (ox, oy, cw, ch) = (ox?, oy?, cw?, ch?);
-        let x = active.x.checked_add(ox).ok_or_else(|| RawError::malformed("DNG crop x coordinate overflow"))?;
-        let y = active.y.checked_add(oy).ok_or_else(|| RawError::malformed("DNG crop y coordinate overflow"))?;
-        let right = x.checked_add(cw).ok_or_else(|| RawError::malformed("DNG crop right edge overflow"))?;
-        let bottom = y.checked_add(ch).ok_or_else(|| RawError::malformed("DNG crop bottom edge overflow"))?;
-        let active_right = active.x.checked_add(active.width).ok_or_else(|| RawError::malformed("DNG active-area right edge overflow"))?;
-        let active_bottom = active.y.checked_add(active.height).ok_or_else(|| RawError::malformed("DNG active-area bottom edge overflow"))?;
-        if x < active.x || y < active.y || right > active_right || bottom > active_bottom {
-            return Err(RawError::malformed("DNG default crop lies outside the active area"));
-        }
-        let r = Rect::new(x, y, cw, ch);
-        if !r.is_empty() {
-            crop = r;
+        if let ([ox, oy], [cw, ch]) = (origin.as_slice(), size.as_slice()) {
+            let (ox, oy, cw, ch) = (
+                crop_value(*ox, "DefaultCropOrigin"),
+                crop_value(*oy, "DefaultCropOrigin"),
+                crop_value(*cw, "DefaultCropSize"),
+                crop_value(*ch, "DefaultCropSize"),
+            );
+            let (ox, oy, cw, ch) = (ox?, oy?, cw?, ch?);
+            let active_right = active.x.checked_add(active.width).ok_or_else(|| RawError::malformed("DNG active-area right edge overflow"))?;
+            let active_bottom = active.y.checked_add(active.height).ok_or_else(|| RawError::malformed("DNG active-area bottom edge overflow"))?;
+            let candidate = active.x.checked_add(ox).zip(active.y.checked_add(oy)).and_then(|(x, y)| {
+                let right = x.checked_add(cw)?;
+                let bottom = y.checked_add(ch)?;
+                (x >= active.x && y >= active.y && right <= active_right && bottom <= active_bottom).then_some(Rect::new(x, y, cw, ch))
+            });
+            if let Some(r) = candidate.filter(|r| !r.is_empty()) {
+                crop = r;
+            } else {
+                warnings.push("out-of-range or empty DNG default crop; active area used".to_string());
+            }
+        } else {
+            warnings.push("incomplete DNG default crop; active area used".to_string());
         }
     }
     let scale = t.tag_floats(&raw, tag::DEFAULT_SCALE);
