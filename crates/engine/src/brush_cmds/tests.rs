@@ -69,6 +69,10 @@ fn paint_commands_bound_hostile_time_and_reject_oversized_brushes() {
     }
     let result = s.execute("paint.stroke", json!({"points": [[8, 8]], "brush": {"dualBrush": {"enabled": true, "size": 1e30}}}));
     assert!(result.is_err(), "enabled dual brush dimensions are bounded too");
+
+    s.execute("tools.setBrush", json!({"size": 5000})).expect("the shared brush limit is accepted");
+    assert!(s.execute("tools.setBrush", json!({"size": 5001})).is_err(), "tools.setBrush must reject sizes above the shared limit");
+    assert_eq!(s.tools.brush.size, 5000.0, "a rejected brush update must not change the session brush");
 }
 
 #[test]

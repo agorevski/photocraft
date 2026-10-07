@@ -399,6 +399,9 @@ fn build_up_accumulates_over_time() {
 fn huge_airbrush_time_gap_emits_bounded_catch_up() {
     let b = BrushSettings { build_up: true, build_up_rate: 1000.0, ..brush() };
     let a = StrokePoint { time: 0.0, ..StrokePoint::new(20.0, 20.0, 1.0) };
+    let brief_pause = StrokePoint { time: 200.0, ..a };
+    assert_eq!(dabs_of(&b, &[a, brief_pause]).len(), 201, "a 200 ms pause should retain its airbrush build-up");
+
     let z = StrokePoint { time: f64::MAX, ..a };
     let d = dabs_of(&b, &[a, z]);
     assert!(d.len() <= 2, "a huge pause should resume with one dab, not replay its time backlog: {}", d.len());

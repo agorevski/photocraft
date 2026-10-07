@@ -19,8 +19,8 @@ pub const SPEED_SPACING_MS: f64 = 8.0;
 
 /// Densest speed spacing, in pixels between dabs (a slow, long stroke never floods the buffer).
 const MIN_SPEED_STEP: f64 = 0.5;
-/// Maximum airbrush catch-up dabs for one input segment; longer pauses resume at the new point.
-const MAX_AIRBRUSH_DABS_PER_SEGMENT: usize = 128;
+/// Maximum airbrush catch-up dabs for one input segment.
+const MAX_AIRBRUSH_DABS_PER_SEGMENT: usize = 512;
 
 #[inline]
 fn lerp_pt(a: &StrokePoint, b: &StrokePoint, f: f64) -> StrokePoint {

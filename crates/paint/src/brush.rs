@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::mixer::MixerSettings;
 use crate::tile::GrayTile;
 
-/// Largest brush diameter the rasterizer accepts. This bounds each dense dab footprint.
-pub const MAX_BRUSH_SIZE: f32 = 2048.0;
+/// Largest brush diameter accepted by the rasterizer and brush controls.
+pub const MAX_BRUSH_SIZE: f32 = 5000.0;
 
 /// What drives a dynamic parameter (Photoshop's "Control" pop-ups).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
