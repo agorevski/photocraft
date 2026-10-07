@@ -207,6 +207,7 @@ fn params_contain_ambient_path(id: &str, params: &Value) -> bool {
         "image.adjustments.colorLookup" | "layer.newAdjustmentLayer.colorLookup" | "layer.setAdjustment" => &["file"],
         "filter.distort.displace" => &["mapPath"],
         "layer.quickExportAsPng" | "layer.exportAs" => &["path"],
+        "image.mode.rgb" | "image.mode.grayscale" | "image.mode.cmyk" | "image.mode.lab" => &["profile"],
         "edit.assignProfile" | "edit.convertToProfile" | "edit.profileInfo" | "view.proofSetup" | "view.gamutWarning" => &["profile"],
         "edit.colorSettings" => &["workingRgb", "workingCmyk", "workingGray"],
         _ => &[],
@@ -239,8 +240,8 @@ fn preferences_may_grant_ambient_paths(id: &str, params: &Value) -> bool {
 }
 
 fn preference_uses_ambient_filesystem(path: &str) -> bool {
-    let Some(section) = path.split('.').next() else { return true };
-    path.is_empty() || matches!(section, "colorSettings" | "scriptEvents" | "historyLog" | "plugIns" | "scratchDisks")
+    let Some(section) = path.split('.').find(|segment| !segment.is_empty()) else { return true };
+    matches!(section, "colorSettings" | "scriptEvents" | "historyLog" | "plugIns" | "scratchDisks")
 }
 
 fn command_uses_ambient_path(id: &str, params: &Value) -> bool {
@@ -440,6 +441,8 @@ mod tests {
         }
         assert!(authorize_engine_command("image.mode.cmyk", &serde_json::json!({})).is_ok());
         assert!(authorize_desktop_engine_command("image.mode.cmyk", &serde_json::json!({})).is_err());
+        assert!(authorize_engine_command("image.mode.rgb", &serde_json::json!({"profile": "/outside/profile.icc"})).is_err());
+        assert!(authorize_engine_command("image.mode.rgb", &serde_json::json!({"profile": "srgb"})).is_ok());
         assert!(authorize_engine_command("filter.distort.displace", &serde_json::json!({"mapPath": "outside.png"})).is_err());
         assert!(authorize_engine_command("layer.setAdjustment", &serde_json::json!({"file": "outside.cube"})).is_err());
         assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": "colorSettings.workingRgb", "value": "outside.icc"})).is_err());
@@ -469,7 +472,10 @@ mod tests {
             "colorSettings.workingRgb",
             "scriptEvents",
             "scriptEvents.enabled",
+            ".scriptEvents",
+            ".scriptEvents.enabled",
             "historyLog.filePath",
+            ".historyLog.filePath",
             "plugIns.additionalPluginsFolder",
             "scratchDisks.disks",
         ] {
@@ -479,6 +485,70 @@ mod tests {
             authorize_engine_command("prefs.set", &serde_json::json!({"values": {"interface.language": "fr", "historyLog.filePath": "/outside/log"}})).is_err()
         );
         assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": "interface.language", "value": "fr"})).is_ok());
+    }
+
+    #[test]
+    fn registry_filesystem_path_params_are_classified() {
+        let probe = serde_json::json!({
+            "path": "/outside/photocraft-probe",
+            "file": "/outside/photocraft-probe.icc",
+            "mapPath": "/outside/photocraft-probe.png",
+            "profile": "/outside/photocraft-probe.icc",
+            "workingRgb": "/outside/photocraft-probe.icc",
+            "workingCmyk": "/outside/photocraft-probe.icc",
+            "workingGray": "/outside/photocraft-probe.icc",
+            "input": "/outside/photocraft-input",
+            "output": "/outside/photocraft-output",
+            "paths": ["/outside/photocraft-probe.psd"],
+        });
+        let preference_probe = serde_json::json!({"path": ".scriptEvents", "value": {}});
+        let unclassified: Vec<_> = photocraft_engine::command_specs()
+            .iter()
+            .filter(|spec| documents_filesystem_path_params(spec.id, spec.params))
+            .filter(|spec| {
+                let params = if spec.id == "prefs.set" { &preference_probe } else { &probe };
+                authorize_engine_command(spec.id, params).is_ok()
+            })
+            .map(|spec| spec.id)
+            .collect();
+        assert!(unclassified.is_empty(), "filesystem path parameters in the command registry need an automation policy: {unclassified:?}");
+    }
+
+    fn documents_filesystem_path_params(id: &str, params: &str) -> bool {
+        if matches!(id, "prefs.get" | "prefs.reset") {
+            return false;
+        }
+        // These registry descriptions refer to document vector paths, not host files.
+        if matches!(
+            id,
+            "filter.blurGallery.pathBlur"
+                | "filter.render.flame"
+                | "shape.create"
+                | "shape.edit"
+                | "shape.info"
+                | "shape.presets.list"
+                | "shape.presets.new"
+                | "path.list"
+                | "path.info"
+                | "path.set"
+                | "path.transform"
+                | "path.clippingPath.set"
+                | "path.rename"
+                | "select.toWorkPath"
+                | "layer.vectorMask.add"
+                | "layer.vectorMask.edit"
+                | "layer.vectorMask.info"
+                | "paint.symmetryFromPath"
+                | "edit.defineCustomShape"
+                | "layer.combineShapes.unite"
+                | "layer.combineShapes.subtractFrontShape"
+                | "layer.combineShapes.intersectShapeAreas"
+                | "layer.combineShapes.excludeOverlappingShapes"
+                | "layer.combineShapes.mergeShapeComponents"
+        ) {
+            return false;
+        }
+        params.to_ascii_lowercase().contains("path")
     }
 
     #[test]
