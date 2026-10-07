@@ -31,6 +31,8 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("view.extras", "Extras", &["View"], Some("Cmd+H")),
     ("view.show.targetPath", "Target Path", &["View", "Show"], Some("Cmd+Shift+H")),
     ("view.screenMode.cycle", "Cycle Screen Mode", &[], Some("F")),
+    ("edit.freeTransformCopy", "Free Transform a Copy", &[], Some("Cmd+Alt+T")),
+    ("type.editText", "Edit Type", &[], None),
     ("view.zoomIn", "Zoom In", &["View"], Some("Cmd+=")),
     ("view.zoomOut", "Zoom Out", &["View"], Some("Cmd+-")),
     ("view.fitOnScreen", "Fit on Screen", &["View"], Some("Cmd+0")),
@@ -225,11 +227,12 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
             }
         }
         "file.save" => {
+            // Writes back only to a layered file; a flat one goes through Save As.
             let path = params
                 .get("path")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| app.session.active().and_then(|d| d.path.clone()).filter(|p| saves_in_place(p)));
+                .or_else(|| app.session.active().and_then(|d| d.path.clone()).filter(|p| photocraft_engine::file_cmds::saves_in_place(p)));
             app.save_as(path).map(|(p, w)| json!({"path": p, "warnings": w}))
         }
         "file.exit" => {
@@ -308,6 +311,13 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
         "layer.layerStyle.blendingOptions" if params.as_object().is_none_or(|o| o.is_empty()) => {
             crate::layer_style::open(app, Some(crate::layer_style::BLENDING)).map(|d| json!({"dialog": d})).ok_or_else(|| "no active layer".to_string())
         }
+        "type.editText" => {
+            crate::type_tool::edit_active(app)?;
+            if let Some(focus) = ctx.memory(|m| m.focused()) {
+                ctx.memory_mut(|m| m.surrender_focus(focus));
+            }
+            Ok(Value::Null)
+        }
         // Layer Content Options…: the adjustment / fill controls live in Properties.
         "layer.layerContentOptions" => {
             let r = app.run(id, params)?;
@@ -367,7 +377,18 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
         | "edit.transform.rotate"
         | "edit.transform.skew"
         | "edit.transform.distort"
-        | "edit.transform.perspective" => crate::transform_tool::begin(app, ctx).map(|_| json!({"transform": app.ui.transform})),
+        | "edit.transform.perspective" => {
+            // While a box is up, Scale / Rotate / Skew / Distort / Perspective (and Free Transform)
+            // switch its mode; otherwise they start one in that mode.
+            if app.ui.transform.is_none() {
+                crate::transform_tool::begin(app, ctx)?;
+            }
+            if let Some(t) = app.ui.transform.as_mut() {
+                t.mode = crate::state::TransformMode::for_command(id);
+            }
+            Ok(json!({"transform": app.ui.transform}))
+        }
+        "edit.freeTransformCopy" => crate::transform_tool::begin_copy(app, ctx).map(|_| json!({"transform": app.ui.transform})),
         // Edit › Transform › Warp from the menu: interactive Warp mode (with params: the engine).
         "edit.transform.warp" | "layer.smartObjects.warp" if params.as_object().is_none_or(|o| o.is_empty()) => {
             crate::transform_tool::begin_warp(app, ctx).map(|_| json!({"transform": app.ui.transform}))
@@ -381,6 +402,9 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
         {
             let at = params.get("at").and_then(Value::as_array).and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?]));
             crate::transform_tool::split(app, id, at).map(|_| json!({"transform": app.ui.transform}))
+        }
+        "edit.transform.warpGrid" if app.ui.transform.as_ref().is_some_and(|t| t.warp.is_some()) && params.get("warp").is_none() => {
+            crate::transform_tool::edit_session_warp(app, id, &params).map(|_| json!({"transform": app.ui.transform}))
         }
         sz if crate::sizing::is_sizing(sz) && params.as_object().is_none_or(|o| o.is_empty()) => {
             Ok(json!({"dialog": crate::sizing::open(app, sz).ok_or("no document")?}))
@@ -430,13 +454,6 @@ fn open_path(app: &mut PhotocraftApp, path: &str) -> Result<Value, String> {
     app.open_path(path).map(|w| json!({"warnings": w}))
 }
 
-/// File › Save writes back to the document's own file for layered formats (PSD, PSB, .pcraft);
-/// flat files go through Save As, like Photoshop.
-fn saves_in_place(path: &str) -> bool {
-    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-    matches!(ext.as_str(), "psd" | "psb" | "pcraft")
-}
-
 pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
     // Photoshop greys these for the Background layer, other layer kinds or single-layer documents.
     if crate::enable_rules::disabled(app, id) {
@@ -457,6 +474,9 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
     if let Some(e) = crate::plugin_ui::is_enabled(app, id) {
         return e;
     }
+    if let Some(e) = crate::transform_tool::is_enabled(app, id) {
+        return e;
+    }
     match id {
         "file.open" | "file.exit" | "file.clearRecent" | "help.about" | "help.systemInfo" | "edit.search" => true,
         i if i.starts_with("file.openRecent.") => true,
@@ -472,21 +492,30 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
         "view.proofSetup.custom" => app.session.active().is_some(),
         "view.rulers" | "view.show.grid" | "view.show.guides" | "view.snap" | "view.lockGuides" => true,
         // An image copied in another app can only be seen by reading the OS clipboard, which happens
-        // on an explicit paste: with a clipboard service, Paste stays enabled whenever a document is open.
-        "edit.paste" | "edit.pasteSpecial.pasteInPlace" => {
-            app.session.is_enabled(id) || (app.services.clipboard_get_image.is_some() && app.session.active().is_some())
-        }
+        // on an explicit paste: with a clipboard service these stay enabled. Paste and New from
+        // Clipboard need no document (with none open, Paste makes one); Paste in Place does.
+        "edit.paste" | "file.newFromClipboard" => app.session.is_enabled(id) || app.services.clipboard_get_image.is_some(),
+        "edit.pasteSpecial.pasteInPlace" => app.session.is_enabled(id) || (app.services.clipboard_get_image.is_some() && app.session.active().is_some()),
         "select.selectAndMask" => app.session.is_enabled("select.refineEdge"),
+        "type.editText" => app
+            .session
+            .active()
+            .and_then(|s| s.active_layer.and_then(|id| s.doc.layer(id)))
+            .is_some_and(|l| matches!(l.content, photocraft_doc::LayerContent::Text(_))),
         "select.transformSelection" => app.ui.transform.is_none() && app.session.is_enabled("select.transformSelection"),
         i if (i.starts_with("view.zoom") || i == "view.fitOnScreen" || i == "view.actualPixels") || i == "window.newWindowForDocument" => {
             app.session.active().is_some()
         }
+        "edit.freeTransformCopy" => app.ui.transform.is_none() && app.session.active().and_then(|s| s.active_layer).is_some(),
         "edit.freeTransform"
         | "edit.transform.scale"
         | "edit.transform.rotate"
         | "edit.transform.skew"
         | "edit.transform.distort"
-        | "edit.transform.perspective" => app.ui.transform.is_none() && app.session.active().and_then(|s| s.active_layer).is_some(),
+        | "edit.transform.perspective" => match &app.ui.transform {
+            Some(t) => t.warp.is_none(),
+            None => app.session.active().and_then(|s| s.active_layer).is_some(),
+        },
         i => app.session.is_enabled(i),
     }
 }
@@ -595,6 +624,9 @@ pub fn is_live(id: &str) -> bool {
         || crate::timeline_ui::handles(id)
 }
 
+/// Commands outside the catalogue that belong right after a catalogue item: `(id, after)`.
+const PLACE_AFTER: &[(&str, &str)] = &[("file.newFromClipboard", "file.new"), ("layer.removeBackground", "layer.layerMask.fromTransparency")];
+
 pub fn menu_items(app: &PhotocraftApp) -> Vec<MenuItem> {
     // 1) Photoshop's full menu tree, in Photoshop order; live where we implement the command.
     let known = is_live;
@@ -637,9 +669,11 @@ pub fn menu_items(app: &PhotocraftApp) -> Vec<MenuItem> {
     for e in extra {
         let dup = items.iter().any(|i| i.id == e.id || (i.path == e.path && i.label.trim_end_matches('…') == e.label.trim_end_matches('…')));
         if !dup {
-            // Insert after the last item of the same top-level menu, keeping menus contiguous.
+            // Insert after the item it belongs next to, else after the last item of the same
+            // top-level menu, keeping menus contiguous.
             let top = e.path.first().cloned();
-            let at = items.iter().rposition(|i| i.path.first() == top.as_ref()).map_or(items.len(), |p| p + 1);
+            let after = PLACE_AFTER.iter().find(|(id, _)| *id == e.id).and_then(|(_, a)| items.iter().position(|i| i.id == *a));
+            let at = after.or_else(|| items.iter().rposition(|i| i.path.first() == top.as_ref())).map_or(items.len(), |p| p + 1);
             items.insert(at, e);
         }
     }
@@ -737,16 +771,33 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
             nav.bar_bottom = Some(ui.max_rect().bottom());
             let mut buttons = Vec::with_capacity(TOP_MENUS.len());
             for top in TOP_MENUS {
-                let r = ui.menu_button(egui::RichText::new(crate::i18n::tr(lang, top)).color(t.text_dim), |ui| {
-                    let items = items.get_or_init(|| menu_items(app_ref));
-                    let mine: Vec<&MenuItem> = items.iter().filter(|i| i.path.first().map(String::as_str) == Some(top)).collect();
-                    ui.set_min_width(220.0);
-                    if mine.is_empty() {
-                        ui.weak(crate::i18n::tr(lang, "(coming soon)"));
-                    }
-                    render_level(ui, &mine, 1, &mut clicked, &mut nav);
-                });
-                buttons.push(r.response);
+                // egui's menu_button toggles on release; these titles open on the press (one
+                // gesture can press, drag to an item and release), so each drives its popup.
+                let title = ui.add(egui::Button::new(egui::RichText::new(crate::i18n::tr(lang, top)).color(t.text_dim)));
+                // The bar's close behaviour and style, as a menu (not bar) config so submenus inside
+                // render as submenus.
+                let bar = egui::containers::menu::MenuConfig::find(ui);
+                let config = egui::containers::menu::MenuConfig::new().close_behavior(bar.close_behavior).style(bar.style.clone());
+                let open = title_press(ui.ctx(), &title);
+                // The release ending the press that opened this menu is a click "outside" the
+                // popup: it must not close it again.
+                let opening = title.clicked() && ui.ctx().data(|d| d.get_temp::<bool>(press_gesture_id())).unwrap_or(false);
+                let close = if opening { egui::PopupCloseBehavior::IgnoreClicks } else { config.close_behavior };
+                egui::Popup::menu(&title)
+                    .open_memory(open)
+                    .close_behavior(close)
+                    .style(config.style.clone())
+                    .info(egui::UiStackInfo::new(egui::UiKind::Menu).with_tag_value(egui::containers::menu::MenuConfig::MENU_CONFIG_TAG, config))
+                    .show(|ui| {
+                        let items = items.get_or_init(|| menu_items(app_ref));
+                        let mine: Vec<&MenuItem> = items.iter().filter(|i| i.path.first().map(String::as_str) == Some(top)).collect();
+                        ui.set_min_width(220.0);
+                        if mine.is_empty() {
+                            ui.weak(crate::i18n::tr(lang, "(coming soon)"));
+                        }
+                        render_level(ui, &mine, 1, &mut clicked, &mut nav);
+                    });
+                buttons.push(title);
             }
             right = buttons.iter().map(|b| b.rect.right()).fold(right, f32::max);
             switch_on_hover(ui.ctx(), &buttons);
@@ -755,11 +806,46 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
         });
     });
     nav.store(ui.ctx());
+    // The press-drag gesture ends with the button (its release was handled by the rows above).
+    if ui.input(|i| i.pointer.primary_released() || !i.pointer.primary_down()) {
+        ui.ctx().data_mut(|d| d.remove::<bool>(press_gesture_id()));
+    }
     if let Some(id) = clicked {
         let ctx = ui.ctx().clone();
-        let _ = invoke(app, &ctx, &id, json!({}));
+        let id = alt_click(id, ctx.input(|i| i.modifiers.alt));
+        if let Err(e) = invoke(app, &ctx, &id, json!({})) {
+            app.ui.status = e;
+        }
     }
     right
+}
+
+fn press_gesture_id() -> egui::Id {
+    egui::Id::new("menu-press-gesture")
+}
+
+/// A menu title's open/close command this frame, the press opens a closed menu (and
+/// starts a press-drag gesture: releasing on an item runs it) or closes an open one; the release
+/// never toggles, so the menu doesn't blink.
+fn title_press(ctx: &egui::Context, title: &egui::Response) -> Option<egui::SetOpenCommand> {
+    // A press this frame on the title (still down, or a whole click within one frame).
+    let pressed = ctx.input(|i| i.pointer.primary_pressed()) && (title.is_pointer_button_down_on() || title.clicked());
+    if !pressed {
+        return None;
+    }
+    let open = egui::Popup::is_id_open(ctx, egui::Popup::default_response_id(title));
+    if !open {
+        ctx.data_mut(|d| d.insert_temp(press_gesture_id(), true));
+    }
+    Some(egui::SetOpenCommand::Bool(!open))
+}
+
+/// Did the press-drag gesture that opened the menus end over `item` (released on it)?
+fn released_on(ui: &egui::Ui, item: &egui::Response) -> bool {
+    item.enabled()
+        && item.contains_pointer()
+        && ui.input(|i| i.pointer.primary_released())
+        && ui.ctx().data(|d| d.get_temp::<bool>(press_gesture_id())).unwrap_or(false)
 }
 
 /// True only when the pointer can actually reach a menu title. A tall submenu can be
@@ -836,7 +922,12 @@ fn render_level_rows(ui: &mut egui::Ui, items: &[&MenuItem], depth: usize, click
             }
             let hit = nav.row(ui, depth - 1, it.enabled, Some(&it.id), |ui, _| {
                 let r = ui.add_enabled(it.enabled, b);
-                let hit = r.clicked();
+                let r = match it.id.as_str() {
+                    "image.mode.bits8" | "image.mode.bits16" => r.on_hover_text(crate::i18n::tr(lang, "Integer")),
+                    "image.mode.bits32" => r.on_hover_text(crate::i18n::tr(lang, "Floating point")),
+                    _ => r,
+                };
+                let hit = r.clicked() || released_on(ui, &r);
                 (r, hit)
             });
             if hit {
@@ -868,6 +959,15 @@ fn render_level_rows(ui: &mut egui::Ui, items: &[&MenuItem], depth: usize, click
     }
 }
 
+/// The command a menu click runs: ⌥ + Merge Down / Merge Layers / Merge Visible keep the
+/// originals, running Stamp Down / Stamp Visible instead (#217).
+pub fn alt_click(id: String, alt: bool) -> String {
+    match photocraft_engine::stamp_cmds::alt_variant(&id) {
+        Some(stamp) if alt => stamp.to_string(),
+        _ => id,
+    }
+}
+
 /// Workspace presets (Window → Workspace): which panels are visible.
 pub fn apply_workspace(app: &mut PhotocraftApp) {
     // Saved workspaces (Window › Workspace › New Workspace…) restore their own layout.
@@ -895,6 +995,28 @@ pub fn apply_workspace(app: &mut PhotocraftApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_menu_contains_every_selection_context_action_and_more() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        app.run("select.rect", json!({"x": 2, "y": 2, "width": 8, "height": 8})).unwrap();
+        let items = menu_items(&app);
+        let top: Vec<_> = items.iter().filter(|i| i.path.len() == 1 && i.path.first().is_some_and(|p| p == "Select")).collect();
+        // Context actions live somewhere under Select (Feather stays in Select > Modify, as in the
+        // reference menus).
+        let select: Vec<_> = items.iter().filter(|i| i.path.first().is_some_and(|p| p == "Select")).collect();
+        for &(label, id) in crate::canvas_tool_menu::entries(true).iter().chain(crate::canvas_tool_menu::entries(false)) {
+            assert!(select.iter().any(|i| i.id == id && i.label == label), "Select menu missing {label} ({id})");
+        }
+        assert!(top.iter().any(|i| i.id == "select.all"));
+        assert!(top.iter().any(|i| i.id == "select.colorRange"));
+        assert!(
+            items.iter().any(|i| i.id == "select.modify.feather" && i.path.iter().map(String::as_str).eq(["Select", "Modify"])),
+            "keep the Photoshop Modify route"
+        );
+        assert!(!top.iter().any(|i| i.id == "select.modify.feather"), "no extra top-level Feather");
+    }
 
     #[test]
     fn menu_bar_labels_have_horizontal_padding_and_open_menus() {

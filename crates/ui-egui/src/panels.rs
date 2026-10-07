@@ -24,8 +24,8 @@ const TOOL_SECTIONS: &[&[&[Tool]]] = &[
         &[Tool::Eyedropper, Tool::Ruler, Tool::Note, Tool::Count],
     ],
     &[
-        &[Tool::SpotHealing, Tool::Healing],
-        &[Tool::Brush, Tool::Pencil],
+        &[Tool::SpotHealing, Tool::Healing, Tool::Patch],
+        &[Tool::Brush, Tool::Pencil, Tool::MixerBrush],
         &[Tool::CloneStamp],
         &[Tool::HistoryBrush],
         &[Tool::Eraser, Tool::BackgroundEraser, Tool::MagicEraser],
@@ -289,7 +289,13 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let full = ui.max_rect();
-            let drag = ui.interact(full, ui.id().with("titledrag"), Sense::click_and_drag());
+            // Only the free gap between the menus and the right-hand controls drags the window: a
+            // press on a menu title must open the menu, never move the window. The gap is last
+            // frame's, as the menus are laid out after this.
+            let span_id = ui.id().with("titledrag-span");
+            let (gap_l, gap_r) = ui.ctx().data(|d| d.get_temp::<(f32, f32)>(span_id)).unwrap_or((full.right(), full.right()));
+            let gap = egui::Rect::from_x_y_ranges(gap_l.max(full.left())..=gap_r.min(full.right()).max(gap_l), full.y_range());
+            let drag = ui.interact(gap, ui.id().with("titledrag"), Sense::click_and_drag());
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
@@ -341,6 +347,7 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     })
                     .inner;
             });
+            ui.ctx().data_mut(|d| d.insert_temp(span_id, (menus_right, controls_left)));
             let font = theme::medium(13.0);
             let galley = ui.painter().layout_no_wrap(title.clone(), font.clone(), t.text_dim);
             if let Some(x) = title_x(full.center().x, menus_right, controls_left, galley.size().x) {
@@ -423,7 +430,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 }
                 let tool = app.ui.tool;
                 // Brush edits here go through `tools.setBrush`, one journal entry per gesture (Rule 1).
-                if (tool.is_brushlike() && !matches!(tool, Tool::Brush | Tool::Pencil | Tool::Eraser)) || tool == Tool::QuickSelection {
+                if (tool.is_brushlike() && !matches!(tool, Tool::Brush | Tool::Pencil | Tool::MixerBrush | Tool::Eraser)) || tool == Tool::QuickSelection {
                     let before = app.session.tools.brush.clone();
                     let mut b = before.clone();
                     let pick = brush_preset_chip(ui, &mut b, &app.session.tools.presets);
@@ -456,19 +463,11 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         if widgets::dropdown(ui, "brush-mode", &mut mode, &opts, 96.0) {
                             b.mode = mode;
                         }
-                        opt_label(ui, tl!("Opacity"));
-                        let mut o = b.opacity * 100.0;
-                        if widgets::value_field(ui, &mut o, 0.0..=100.0, "%", 62.0).changed() {
-                            b.opacity = o / 100.0;
-                        }
+                        percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, 62.0);
                         if icons::button(ui, "circle-dot", 24.0, b.pressure_opacity, tl!("Always use pressure for opacity")).clicked() {
                             b.pressure_opacity = !b.pressure_opacity;
                         }
-                        opt_label(ui, tl!("Flow"));
-                        let mut f = b.flow * 100.0;
-                        if widgets::value_field(ui, &mut f, 1.0..=100.0, "%", 62.0).changed() {
-                            b.flow = f / 100.0;
-                        }
+                        percent_field(ui, tl!("Flow"), &mut b.flow, 1.0..=100.0, 62.0);
                         let _ = icons::button(ui, "sparkles", 24.0, false, tl!("Enable airbrush-style build-up effects"));
                         opt_label(ui, tl!("Smoothing"));
                         smoothing_field(ui, b, 58.0);
@@ -495,11 +494,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         if widgets::dropdown(ui, "pencil-mode", &mut mode, &opts, 96.0) {
                             b.mode = mode;
                         }
-                        opt_label(ui, tl!("Opacity"));
-                        let mut o = b.opacity * 100.0;
-                        if widgets::value_field(ui, &mut o, 0.0..=100.0, "%", if t.pro { 62.0 } else { 66.0 }).changed() {
-                            b.opacity = o / 100.0;
-                        }
+                        percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, if t.pro { 62.0 } else { 66.0 });
                         opt_label(ui, tl!("Smoothing"));
                         smoothing_field(ui, b, if t.pro { 58.0 } else { 66.0 });
                         widgets::vline(ui, 22.0);
@@ -512,26 +507,29 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         opt_label(ui, tl!("Size"));
                         widgets::value_field(ui, &mut b.size, 1.0..=2500.0, "px", 76.0);
                         widgets::vline(ui, 22.0);
-                        opt_label(ui, tl!("Hardness"));
-                        let mut h = b.hardness * 100.0;
-                        if widgets::value_field(ui, &mut h, 0.0..=100.0, "%", 66.0).changed() {
-                            b.hardness = h / 100.0;
-                        }
-                        opt_label(ui, tl!("Opacity"));
-                        let mut o = b.opacity * 100.0;
-                        if widgets::value_field(ui, &mut o, 0.0..=100.0, "%", 66.0).changed() {
-                            b.opacity = o / 100.0;
-                        }
-                        opt_label(ui, tl!("Flow"));
-                        let mut f = b.flow * 100.0;
-                        if widgets::value_field(ui, &mut f, 1.0..=100.0, "%", 66.0).changed() {
-                            b.flow = f / 100.0;
-                        }
+                        percent_field(ui, tl!("Hardness"), &mut b.hardness, 0.0..=100.0, 66.0);
+                        percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, 66.0);
+                        percent_field(ui, tl!("Flow"), &mut b.flow, 1.0..=100.0, 66.0);
                         opt_label(ui, tl!("Smoothing"));
                         smoothing_field(ui, b, 66.0);
                         widgets::vline(ui, 22.0);
                         widgets::toggle(ui, &mut b.pressure_size, tl!("Pressure for Size"));
                         widgets::toggle(ui, &mut b.pressure_opacity, tl!("Pressure for Opacity"));
+                    }
+                    Tool::MixerBrush => {
+                        picked = brush_preset_chip(ui, b, &app.session.tools.presets);
+                        crate::brush_picker::settings_toggle(app, ui);
+                        widgets::vline(ui, 22.0);
+                        for (label, value) in [
+                            (tl!("Wet"), &mut b.mixer.wet),
+                            (tl!("Load"), &mut b.mixer.load),
+                            (tl!("Mix"), &mut b.mixer.mix),
+                            (tl!("Flow"), &mut b.mixer.flow),
+                        ] {
+                            percent_field(ui, label, value, 0.0..=100.0, 62.0);
+                        }
+                        widgets::vline(ui, 22.0);
+                        widgets::checkbox(ui, &mut b.mixer.sample_all_layers, tl!("Sample All Layers"));
                     }
                     Tool::RectMarquee | Tool::EllipseMarquee if t.pro => {
                         ui.spacing_mut().item_spacing.x = 2.0;
@@ -662,6 +660,9 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         }
                         ui.spacing_mut().item_spacing.x = 8.0;
                         widgets::vline(ui, 22.0);
+                        opt_label(ui, tl!("Mode"));
+                        let opts: Vec<(BlendMode, &str)> = BlendMode::LAYER_MODES.iter().map(|m| (*m, m.label())).collect();
+                        widgets::dropdown(ui, "gradient-blend-mode", &mut app.ui.tool_options.gradient_blend_mode, &opts, 96.0);
                         opt_label(ui, tl!("Opacity"));
                         widgets::value_field(ui, &mut app.ui.tool_options.fill_opacity, 1.0..=100.0, "%", 62.0);
                         widgets::checkbox(ui, &mut app.ui.tool_options.gradient_reverse, tl!("Reverse"));
@@ -739,7 +740,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                             let mut section = |ui: &mut egui::Ui, title: &str, prefix: &str| {
                                 ui.label(egui::RichText::new(tl!(&title)).small().color(t.text_dim));
                                 for c in photocraft_engine::command_specs().iter().filter(|c| c.id.starts_with(prefix)) {
-                                    if ui.add_enabled(app.session.is_enabled(c.id), egui::Button::new(c.label)).clicked() {
+                                    if ui.add_enabled(app.session.is_enabled(c.id), egui::Button::new(tl!(c.label))).clicked() {
                                         let _ = app.run(c.id, json!({}));
                                         ui.close();
                                     }
@@ -834,6 +835,14 @@ fn opt_label(ui: &mut egui::Ui, s: &str) {
     let t = Tokens::get(ui.ctx());
     let text = if t.pro && !s.ends_with(':') { format!("{s}:") } else { s.to_string() };
     ui.label(RichText::new(tl!(&text)).color(t.text_dim));
+}
+
+fn percent_field(ui: &mut egui::Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, width: f32) {
+    opt_label(ui, label);
+    let mut percent = *value * 100.0;
+    if widgets::value_field(ui, &mut percent, range, "%", width).changed() {
+        *value = percent / 100.0;
+    }
 }
 
 fn hint(ui: &mut egui::Ui, s: &str) {
@@ -1198,6 +1207,7 @@ fn swatches(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let c = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0, 1.0];
         if resp.clicked() {
             app.session.tools.foreground = c;
+            crate::type_tool::foreground_changed(app);
         }
         if resp.secondary_clicked() {
             app.session.tools.background = c;
@@ -1209,20 +1219,28 @@ fn swatches(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 fn color_picker(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let fg = app.session.tools.foreground;
-    let hsva0 = srgb_hsva(fg);
+    // Keep the last edited HSB while it still gives the foreground: black and greys have no hue or
+    // saturation of their own, so recomputing them from RGB would reset what was just typed to 0.
+    let key = egui::Id::new("color-picker-hsva");
+    let stored: Option<egui::ecolor::Hsva> = ui.data(|d| d.get_temp(key));
+    let hsva0 = stored.filter(|h| h.to_srgb() == srgb_bytes(fg)).unwrap_or_else(|| srgb_hsva(fg));
     let mut h = hsva0.h * 360.0;
     let mut s = hsva0.s * 100.0;
     let mut v = hsva0.v * 100.0;
     let hue = widgets::hue_stops();
-    widgets::slider_row(ui, tl!("Hue"), &mut h, 0.0..=360.0, "°", Some(&hue));
+    let mut changed = widgets::slider_row(ui, tl!("Hue"), &mut h, 0.0..=360.0, "°", Some(&hue)).changed();
     let sat_stops =
         [egui::ecolor::Hsva::new(hsva0.h, 0.0, hsva0.v.max(0.2), 1.0), egui::ecolor::Hsva::new(hsva0.h, 1.0, hsva0.v.max(0.2), 1.0)].map(Color32::from);
-    widgets::slider_row(ui, tl!("Saturation"), &mut s, 0.0..=100.0, "%", Some(&sat_stops));
+    changed |= widgets::slider_row(ui, tl!("Saturation"), &mut s, 0.0..=100.0, "%", Some(&sat_stops)).changed();
     let val_stops = [Color32::BLACK, Color32::from(egui::ecolor::Hsva::new(hsva0.h, hsva0.s, 1.0, 1.0))];
-    widgets::slider_row(ui, tl!("Brightness"), &mut v, 0.0..=100.0, "%", Some(&val_stops));
+    changed |= widgets::slider_row(ui, tl!("Brightness"), &mut v, 0.0..=100.0, "%", Some(&val_stops)).changed();
     let hsva = egui::ecolor::Hsva::new(h / 360.0, s / 100.0, v / 100.0, 1.0);
-    if hsva != hsva0 {
+    // Only an edit counts: the h/s/v round trip isn't exact, so comparing values would rewrite
+    // the foreground (and recolour selected type) every frame.
+    if changed {
         app.session.tools.foreground = hsva_srgb(hsva);
+        ui.data_mut(|d| d.insert_temp(key, hsva));
+        crate::type_tool::foreground_changed(app);
     }
     let [r, g, b, _] = hsva.to_srgba_unmultiplied();
     let t = Tokens::get(ui.ctx());
@@ -1444,7 +1462,7 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             egui::Popup::menu(&adj).show(|ui| {
                 ui.set_min_width(190.0);
                 for c in photocraft_engine::command_specs().iter().filter(|c| c.id.starts_with("layer.newAdjustmentLayer.")) {
-                    if ui.button(c.label.trim_end_matches('…')).clicked() {
+                    if ui.button(tl!(c.label).trim_end_matches('…')).clicked() {
                         actions.push((c.id.into(), json!({})));
                         ui.close();
                     }
@@ -1480,7 +1498,7 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 }
                 ui.separator();
                 for &(kind, label) in crate::layer_style::KINDS {
-                    if ui.button(format!("{label}…")).clicked() {
+                    if ui.button(format!("{}…", tl!(label))).clicked() {
                         crate::layer_style::open(app, Some(kind));
                         ui.close();
                     }
@@ -1595,10 +1613,40 @@ fn layer_row(
     }
     let mut x = rect.left() + 6.0;
     let eye = Rect::from_min_size(pos2(x, rect.center().y - 11.0), vec2(22.0, 22.0));
-    let eye_resp = ui.interact(eye, ui.id().with(("eye", l.id.0)), Sense::click());
-    icons::paint(ui, eye, if l.visible { "eye" } else { "eye-off" }, 15.0, if l.visible { t.icon } else { t.text_faint });
+    // The eye takes drags too (so a drag starting on it never reorders the row): dragging down
+    // the eyes gives every row swept over the visibility the first eye toggled to.
+    let eye_resp = ui.interact(eye, ui.id().with(("eye", l.id.0)), Sense::click_and_drag());
+    // A hidden layer's eye box is left empty (still clickable).
+    if l.visible {
+        icons::paint(ui, eye, "eye", 15.0, t.icon);
+    }
+    let sweep_id = egui::Id::new("layer-eye-sweep");
+    if eye_resp.drag_started() {
+        let visible = !l.visible;
+        ctx.data_mut(|d| d.insert_temp(sweep_id, (visible, vec![l.id.0])));
+        actions.push(("layer.setProps".into(), json!({"layer": l.id.0, "visible": visible})));
+    } else if let Some((visible, mut swept)) = ctx.data(|d| d.get_temp::<(bool, Vec<u64>)>(sweep_id)) {
+        if !ctx.input(|i| i.pointer.primary_down()) {
+            ctx.data_mut(|d| d.remove::<(bool, Vec<u64>)>(sweep_id));
+        } else if let Some(p) = ctx.input(|i| i.pointer.interact_pos())
+            && p.y >= rect.top()
+            && p.y < rect.bottom()
+            && !swept.contains(&l.id.0)
+        {
+            if l.visible != visible {
+                actions.push(("layer.setProps".into(), json!({"layer": l.id.0, "visible": visible})));
+            }
+            swept.push(l.id.0);
+            ctx.data_mut(|d| d.insert_temp(sweep_id, (visible, swept)));
+        }
+    }
     if eye_resp.clicked() {
-        actions.push(("layer.setProps".into(), json!({"layer": l.id.0, "visible": !l.visible})));
+        // ⌥-click shows only this layer; ⌥-click it again to restore the others.
+        if ui.input(|i| i.modifiers.alt) {
+            actions.push(("layer.showOnly".into(), json!({"layer": l.id.0})));
+        } else {
+            actions.push(("layer.setProps".into(), json!({"layer": l.id.0, "visible": !l.visible})));
+        }
     }
     // Everything but the thumbnails, the indentation and the name, so a narrow panel squeezes
     // the indentation first, then the thumbnails (a layer with two masks has three).
@@ -1703,14 +1751,32 @@ fn layer_row(
             actions.push(("ui.maskTarget".into(), json!(false)));
         }
     }
-    // Double-click the name to rename in place (Photoshop ergonomics). The Background can't be
-    // renamed while it's locked, so a double-click turns it into a normal layer instead.
+    // Double-click: the name renames in place; the Background, which can't be renamed while
+    // it's locked, becomes a normal layer; an adjustment or fill thumbnail opens its settings and
+    // a Smart Object thumbnail its contents, and a type thumbnail edits its text; anywhere else
+    // on the row opens Layer Style (#350, #537).
+    // The first click already made this the active layer.
     if resp.double_clicked() {
+        let pos = resp.interact_pointer_pos();
+        let on = |r: Rect| pos.is_some_and(|p| r.expand(2.0).contains(p));
         if crate::doc_props_ui::is_background(doc, l) {
             actions.push(("layer.new.layerFromBackground".into(), json!({})));
-        } else if let Some(done) = crate::layer_row_ui::start_rename(ctx, l.id.0, &l.name) {
-            // One rename at a time: starting this one commits any other (#314).
-            actions.push(done);
+        } else if name_rect.is_some_and(on) {
+            if let Some(done) = crate::layer_row_ui::start_rename(ctx, l.id.0, &l.name) {
+                // One rename at a time: starting this one commits any other (#314).
+                actions.push(done);
+            }
+        } else if pos.and_then(|p| masks.hit(p)).is_none() {
+            let id = match &l.content {
+                LayerContent::Adjustment(_) | LayerContent::Fill(_) if on(thumb) => "layer.layerContentOptions",
+                LayerContent::Smart(_) if on(thumb) => "layer.smartObjects.editContents",
+                LayerContent::Text(_) if on(thumb) => "type.editText",
+                _ => "layer.layerStyle.blendingOptions",
+            };
+            if crate::menus::is_enabled(app, id) {
+                // Null params: run like the menu item, dialog included.
+                actions.push((id.into(), Value::Null));
+            }
         }
     }
     let edit_rect = Rect::from_min_max(pos2(x - 3.0, rect.center().y - 11.0), pos2(name_right.max(x + 40.0), rect.center().y + 11.0));
@@ -1785,19 +1851,7 @@ fn history(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let doc = st.doc.clone();
     let entries = st.history.entries();
     let current = entries.len() - 1;
-    let redo: Vec<String> = {
-        let mut v = Vec::new();
-        let mut h = st.history.clone();
-        let mut d = st.doc.clone();
-        while let Some(label) = h.redo_label().map(str::to_string) {
-            v.push(label);
-            match h.redo(d.clone()) {
-                Some(n) => d = n,
-                None => break,
-            }
-        }
-        v
-    };
+    let redo: Vec<String> = st.history.redo_labels().map(str::to_string).collect();
     // Snapshot row (Photoshop shows the document's opening state with a thumbnail).
     {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
@@ -1858,7 +1912,9 @@ fn history(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             });
         });
     }
-    if let Some(delta) = target {
+    // An open Free Transform owns Undo (transform_tool::intercept): stepping the document's history under
+    // its box would leave it transforming pixels that changed.
+    if let Some(delta) = target.filter(|_| app.ui.transform.is_none()) {
         let (cmd, n) = if delta < 0 { ("edit.undo", -delta) } else { ("edit.redo", delta) };
         for _ in 0..n {
             if app.run(cmd, json!({})).is_err() {
@@ -1940,11 +1996,14 @@ pub fn properties_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
             ui.add_space(8.0);
             widgets::hairline(ui);
             ui.add_space(8.0);
-            if let LayerContent::Adjustment(adj) = &layer.content {
-                adjustment_controls(app, ui, id, adj);
-            } else {
-                layer_controls(app, ui, &layer);
-            }
+            // Per-layer ids, so text still being typed for one layer can't commit to the next.
+            ui.push_id(id, |ui| {
+                if let LayerContent::Adjustment(adj) = &layer.content {
+                    adjustment_controls(app, ui, id, adj);
+                } else {
+                    layer_controls(app, ui, &layer);
+                }
+            });
         });
     });
     if drag != egui::Vec2::ZERO && canvas.is_positive() {
@@ -2088,12 +2147,41 @@ fn adjustments_grid(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
 }
 
+/// The Color panel's foreground and background chips. A click picks the colour the field edits,
+/// framed; a double-click opens the Color Picker on it.
+fn field_chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, chips: Rect) {
+    let t = Tokens::get(ui.ctx());
+    let bgr = Rect::from_min_size(chips.min + vec2(13.0, 13.0), vec2(22.0, 22.0));
+    let fgr = Rect::from_min_size(chips.min + vec2(3.0, 3.0), vec2(22.0, 22.0));
+    let frame = Stroke::new(1.0, t.text_dim);
+    let bg_active = app.ui.color_panel.background;
+    let p = ui.painter();
+    p.rect_filled(bgr, 2.0, c32(app.session.tools.background));
+    p.rect_stroke(bgr, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
+    if bg_active {
+        p.rect_stroke(bgr.expand(2.0), 2.0, frame, StrokeKind::Outside);
+    }
+    p.rect_filled(fgr, 2.0, c32(app.session.tools.foreground));
+    p.rect_stroke(fgr, 2.0, Stroke::new(1.0, Color32::from_gray(210)), StrokeKind::Outside);
+    if !bg_active {
+        p.rect_stroke(fgr.expand(2.0), 2.0, frame, StrokeKind::Outside);
+    }
+    // The foreground is on top, so it takes the clicks where the two overlap.
+    let bg_resp = ui.interact(bgr, ui.id().with("field-bg"), Sense::click());
+    let fg_resp = ui.interact(fgr, ui.id().with("field-fg"), Sense::click());
+    let picked = if fg_resp.clicked() { false } else { bg_resp.clicked() || bg_active };
+    app.ui.color_panel.background = picked;
+    if fg_resp.double_clicked() || bg_resp.double_clicked() {
+        crate::color_picker_ui::open(app, if picked { "background" } else { "foreground" });
+    }
+}
+
 /// Photoshop Color panel: saturation/brightness field + hue strip, drawn as shaded meshes.
 fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    let fg = app.session.tools.foreground;
-    let key = egui::Id::new("color-field-hue");
-    let mut hsva = srgb_hsva(fg);
+    let bg_active = app.ui.color_panel.background;
+    let key = egui::Id::new(("color-field-hue", bg_active));
+    let mut hsva = srgb_hsva(if bg_active { app.session.tools.background } else { app.session.tools.foreground });
     // Keep hue stable for greys (where RGB->HSV hue is undefined).
     let remembered: f32 = ui.data(|d| d.get_temp(key)).unwrap_or(hsva.h);
     if hsva.s < 0.01 || hsva.v < 0.01 {
@@ -2104,16 +2192,10 @@ fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let h = 120.0;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        // Colour chips (fg/bg) at left, Photoshop style.
-        let (chips, _) = ui.allocate_exact_size(vec2(34.0, h), Sense::hover());
-        let bgr = Rect::from_min_size(chips.min + vec2(10.0, 10.0), vec2(22.0, 22.0));
-        let fgr = Rect::from_min_size(chips.min, vec2(22.0, 22.0));
-        ui.painter().rect_filled(bgr, 2.0, c32(app.session.tools.background));
-        ui.painter().rect_stroke(bgr, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
-        ui.painter().rect_filled(fgr, 2.0, c32(fg));
-        ui.painter().rect_stroke(fgr, 2.0, Stroke::new(1.0, Color32::from_gray(210)), StrokeKind::Outside);
+        let (chips, _) = ui.allocate_exact_size(vec2(38.0, h), Sense::hover());
+        field_chips(app, ui, chips);
         // SV field.
-        let field_w = w - 34.0 - strip_w - 16.0;
+        let field_w = w - 38.0 - strip_w - 16.0;
         let (field, fresp) = ui.allocate_exact_size(vec2(field_w, h), Sense::click_and_drag());
         let mut mesh = egui::Mesh::default();
         let n = 16;
@@ -2170,7 +2252,12 @@ fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let tri = vec![pos2(strip.right() + 1.0, y), pos2(strip.right() + 6.0, y - 4.0), pos2(strip.right() + 6.0, y + 4.0)];
         ui.painter().add(egui::Shape::convex_polygon(tri, t.text, Stroke::NONE));
         if fresp.dragged() || fresp.clicked() || sresp.dragged() || sresp.clicked() {
-            app.session.tools.foreground = hsva_srgb(hsva);
+            if bg_active {
+                app.session.tools.background = hsva_srgb(hsva);
+            } else {
+                app.session.tools.foreground = hsva_srgb(hsva);
+                crate::type_tool::foreground_changed(app);
+            }
             ui.data_mut(|d| d.insert_temp(key, hsva.h));
         }
     });
@@ -2184,9 +2271,13 @@ fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 /// Tool colours are sRGB-encoded floats; egui's Hsva works on sRGB bytes via these helpers
 /// (its `from_rgba_unmultiplied` expects *linear* RGB, which gave wrong readouts).
-fn srgb_hsva(c: [f32; 4]) -> egui::ecolor::Hsva {
+fn srgb_bytes(c: [f32; 4]) -> [u8; 3] {
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    egui::ecolor::Hsva::from_srgb([q(c[0]), q(c[1]), q(c[2])])
+    [q(c[0]), q(c[1]), q(c[2])]
+}
+
+fn srgb_hsva(c: [f32; 4]) -> egui::ecolor::Hsva {
+    egui::ecolor::Hsva::from_srgb(srgb_bytes(c))
 }
 
 fn hsva_srgb(h: egui::ecolor::Hsva) -> [f32; 4] {
@@ -2328,6 +2419,7 @@ fn effect_rows(app: &mut PhotocraftApp, ui: &mut egui::Ui, l: &Layer, depth: usi
             egui::FontId::proportional(11.5),
             if on { t.text_dim } else { t.text_faint },
         );
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name.clone()));
         if resp.double_clicked() {
             crate::layer_style::open(app, kind);
         }
@@ -2382,6 +2474,162 @@ mod color_tests {
             }
         }
     }
+
+    #[test]
+    fn hue_and_saturation_fields_take_values_on_black() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.tools.foreground = [0.0, 0.0, 0.0, 1.0];
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(300.0, 300.0)).build_ui_state(
+            |ui, app: &mut PhotocraftApp| {
+                if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    color_picker(app, ui);
+                }
+            },
+            app,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
+        h.run_steps(2);
+        // Hue, Saturation, Brightness, typed one key per frame. Black has no hue or saturation of its
+        // own, so the first two used to reset to 0 and this ended on white.
+        for (field, typed) in [(0, "120"), (1, "100"), (2, "100")] {
+            h.query_all_by_role(egui::accesskit::Role::SpinButton).nth(field).unwrap().click();
+            h.run_steps(1);
+            for ch in typed.chars() {
+                h.event(egui::Event::Text(ch.to_string()));
+                h.run_steps(1);
+            }
+            h.key_press(egui::Key::Tab);
+            h.run_steps(2);
+        }
+        assert_eq!(srgb_bytes(h.state().session.tools.foreground), [0, 255, 0]);
+    }
+
+    fn field_harness(app: PhotocraftApp) -> egui_kittest::Harness<'static, PhotocraftApp> {
+        // 60 fps steps, so two clicks a frame apart are a double-click.
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(300.0, 200.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, app: &mut PhotocraftApp| {
+                if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    color_field(app, ui);
+                }
+            },
+            app,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
+        h.run_steps(2);
+        h
+    }
+
+    fn click(h: &mut egui_kittest::Harness<'_, PhotocraftApp>, p: egui::Pos2) {
+        h.hover_at(p);
+        h.run_steps(1);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.run_steps(1);
+        }
+    }
+
+    /// A click on the background chip makes the field edit the background, not the foreground.
+    #[test]
+    fn background_chip_retargets_the_color_field() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.tools.foreground = [0.2, 0.4, 0.6, 1.0];
+        app.session.tools.background = [0.0, 0.0, 0.0, 1.0];
+        let mut h = field_harness(app);
+        let min = h.ctx.input(|i| i.viewport_rect()).min;
+        // The background chip's corner that the foreground chip doesn't cover.
+        click(&mut h, min + vec2(40.0, 40.0));
+        // The field's top-left: no saturation, full brightness.
+        click(&mut h, min + vec2(60.0, 10.0));
+        assert!(h.state().ui.color_panel.background);
+        let tools = &h.state().session.tools;
+        assert_eq!(tools.foreground, [0.2, 0.4, 0.6, 1.0]);
+        assert!(tools.background[..3].iter().all(|&v| v > 0.9), "{:?}", tools.background);
+    }
+
+    #[test]
+    fn double_clicking_a_chip_opens_its_color_picker() {
+        let app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        let mut h = field_harness(app);
+        let min = h.ctx.input(|i| i.viewport_rect()).min;
+        // The foreground point is where the chips overlap: the foreground is on top there.
+        for (p, target) in [(vec2(40.0, 40.0), "background"), (vec2(30.0, 30.0), "foreground")] {
+            h.state_mut().ui.dialogs.clear();
+            // Past the last double-click, so this one isn't counted as a triple-click.
+            h.run_steps(40);
+            click(&mut h, min + p);
+            assert!(h.state().ui.dialogs.is_empty(), "a single click only picks the chip");
+            click(&mut h, min + p);
+            let [d] = h.state().ui.dialogs.as_slice() else { panic!("one Color Picker") };
+            assert_eq!(d.fields.get("__colorPicker").and_then(Value::as_str), Some(target));
+        }
+    }
+
+    /// Black has no hue of its own, so each chip remembers the hue last picked for it.
+    #[test]
+    fn each_chip_keeps_its_own_hue_on_black() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.tools.foreground = [0.0, 0.0, 0.0, 1.0];
+        app.session.tools.background = [0.0, 0.0, 0.0, 1.0];
+        let mut h = field_harness(app);
+        let min = h.ctx.input(|i| i.viewport_rect()).min;
+        // The hue strip runs from red at the top through blue (a third down) and green (two thirds).
+        let (strip_x, green, blue) = (285.0, 88.0, 48.0);
+        click(&mut h, min + vec2(strip_x, green));
+        click(&mut h, min + vec2(40.0, 40.0));
+        click(&mut h, min + vec2(strip_x, blue));
+        click(&mut h, min + vec2(16.0, 16.0));
+        // Near the field's top-right: high saturation and brightness.
+        click(&mut h, min + vec2(265.0, 10.0));
+        let [r, g, b] = srgb_bytes(h.state().session.tools.foreground);
+        assert!(g > 200 && r < 64 && b < 64, "the foreground's green, not the background's blue: {:?}", [r, g, b]);
+    }
+}
+
+#[cfg(test)]
+mod history_transform_tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    fn click(h: &mut Harness<'static, PhotocraftApp>, p: egui::Pos2) {
+        h.hover_at(p);
+        h.run_steps(1);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.run_steps(1);
+        }
+    }
+
+    /// While Free Transform is open, clicking a History state leaves the document alone: the
+    /// transform owns Undo. Without a transform the same click steps back as usual.
+    #[test]
+    fn history_rows_wait_for_an_open_transform() {
+        for transforming in [true, false] {
+            let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+            app.run("file.new", json!({"width": 200, "height": 150})).unwrap();
+            app.run("layer.new.layer", json!({})).unwrap();
+            app.run("select.rect", json!({"x": 20, "y": 20, "width": 60, "height": 40})).unwrap();
+            app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
+            app.run("select.deselect", json!({})).unwrap();
+            let mut h = Harness::builder().with_size(vec2(300.0, 400.0)).build_ui_state(|ui, app: &mut PhotocraftApp| history(app, ui), app);
+            h.run_steps(2);
+            if transforming {
+                let ctx = h.ctx.clone();
+                crate::transform_tool::begin(h.state_mut(), &ctx).unwrap();
+            }
+            let steps = h.state().session.active().unwrap().history.entries().len();
+            // The first state's row, below the 38 pt snapshot row.
+            let row = h.ctx.input(|i| i.viewport_rect()).min + vec2(60.0, 60.0);
+            click(&mut h, row);
+            let after = h.state().session.active().unwrap().history.entries().len();
+            if transforming {
+                assert_eq!(after, steps, "the document's history is untouched");
+                assert!(h.state().ui.transform.is_some());
+            } else {
+                assert!(after < steps, "the click steps back: {steps} -> {after}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2431,5 +2679,105 @@ mod lock_tests {
         app.run("layer.setProps", json!({"locks": {"transparency": true}})).unwrap();
         click_lock(&mut app);
         assert!(!app.session.active().unwrap().doc.layers[0].locks.transparency);
+    }
+}
+
+#[cfg(test)]
+mod swatch_type_tests {
+    use super::*;
+    use egui::Modifiers;
+    use egui_kittest::Harness;
+
+    /// Clicking a swatch while characters are selected recolours them, not just the foreground.
+    #[test]
+    fn clicking_a_swatch_recolours_selected_type() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 400, "height": 200})).unwrap();
+        let id = app.run("type.create", json!({"text": "Hello world", "size": 40, "x": 20, "y": 100, "color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+        app.ui.tool = Tool::Type;
+        app.ui.text_edit =
+            Some(crate::state::TextEdit { layer: id, caret: 0, anchor: 5, session: "s".into(), created: false, dragging: false, resize: None, preedit: None });
+        let mut h = Harness::builder().with_size(vec2(300.0, 200.0)).build_ui_state(|ui, app: &mut PhotocraftApp| swatches(app, ui), app);
+        h.run_steps(2);
+        // The first swatch is the top-left cell of the panel's content.
+        let p = h.ctx.input(|i| i.viewport_rect()).min + vec2(12.0, 12.0);
+        h.hover_at(p);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(2);
+        let s = SWATCHES[0];
+        assert_eq!(h.state().session.tools.foreground, [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0, 1.0]);
+        let st = h.state().session.active().unwrap();
+        let Some(photocraft_doc::LayerContent::Text(t)) = st.doc.layer(photocraft_doc::LayerId(id)).map(|l| &l.content) else { panic!("type layer") };
+        let runs = t.char_runs();
+        assert_eq!(runs[0].len, 5, "the selection is its own run");
+        assert_eq!(runs[0].style.color.to_rgba8(), [s[0], s[1], s[2], 255]);
+        assert_eq!(runs[1].style.color.to_rgba8(), [255, 255, 255, 255]);
+    }
+
+    /// The HSB sliders only act on an edit. Their h/s/v round trip isn't exact for every colour
+    /// (#D8452E isn't), and comparing values used to rewrite the foreground every frame, which
+    /// would recolour selected type the moment it was selected.
+    #[test]
+    fn idle_hsb_sliders_leave_the_foreground_and_selected_type_alone() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 400, "height": 200})).unwrap();
+        let id = app.run("type.create", json!({"text": "Hello world", "size": 40, "x": 20, "y": 100, "color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+        app.run("tools.setColors", json!({"foreground": "#d8452e"})).unwrap();
+        let fg = app.session.tools.foreground;
+        app.ui.tool = Tool::Type;
+        app.ui.text_edit =
+            Some(crate::state::TextEdit { layer: id, caret: 0, anchor: 5, session: "s".into(), created: false, dragging: false, resize: None, preedit: None });
+        let mut h = Harness::builder().with_size(vec2(300.0, 300.0)).build_ui_state(|ui, app: &mut PhotocraftApp| color_picker(app, ui), app);
+        h.run_steps(4);
+        assert_eq!(h.state().session.tools.foreground, fg);
+        let st = h.state().session.active().unwrap();
+        let Some(photocraft_doc::LayerContent::Text(t)) = st.doc.layer(photocraft_doc::LayerId(id)).map(|l| &l.content) else { panic!("type layer") };
+        assert_eq!(t.char_runs().len(), 1, "still one white run");
+    }
+}
+
+#[cfg(test)]
+mod properties_card_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    /// Arithmetic left uncommitted in one fill layer's card never lands on the layer selected next.
+    #[test]
+    fn uncommitted_arithmetic_stays_with_its_layer() {
+        let mut s = photocraft_engine::Session::new();
+        s.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
+        let mut ids = Vec::new();
+        for color in ["#00ff00", "#0000ff"] {
+            s.execute("layer.newFillLayer.solidColor", json!({"color": color})).unwrap();
+            ids.push(s.active().unwrap().active_layer.unwrap());
+        }
+        // The layer selected next already shows 25, the value the edited one has when `25*` stops it.
+        s.execute("layer.setProps", json!({"layer": ids[0].0, "opacity": 0.25})).unwrap();
+        let mut app = PhotocraftApp::new(s, crate::Services::default());
+        app.ui.panels.properties = true;
+        let mut h = Harness::builder().with_size(vec2(800.0, 600.0)).build_ui_state(
+            |ui, app: &mut PhotocraftApp| {
+                if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("semibold".into()))) {
+                    properties_window(app, ui.ctx());
+                }
+            },
+            app,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
+        h.run_steps(2);
+        h.query_all_by_role(egui::accesskit::Role::SpinButton).next().unwrap().click();
+        h.run_steps(1);
+        for ch in "25*2".chars() {
+            h.event(egui::Event::Text(ch.to_string()));
+            h.run_steps(1);
+        }
+        // The Layers panel selects the other layer in the frame the click leaves the field.
+        h.state_mut().session.execute("layer.select", json!({"layer": ids[0].0})).unwrap();
+        h.ctx.memory_mut(|m| m.stop_text_input());
+        h.run_steps(3);
+        let doc = &h.state().session.active().unwrap().doc;
+        assert_eq!(ids.iter().map(|&id| doc.layer(id).unwrap().opacity).collect::<Vec<_>>(), [0.25, 0.25]);
     }
 }

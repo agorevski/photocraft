@@ -331,7 +331,7 @@ fn build() -> Vec<CommandSpec> {
                 // Options bar: anti-aliased ellipse edges (4x4 supersampled) and Feather (applied to the new shape only).
                 let aa = p.get("antiAlias").and_then(Value::as_bool).unwrap_or(true);
                 let feather = p.get("feather").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1000.0) as f32;
-                s.edit("Rectangular Marquee", |doc, _| {
+                s.edit(if ellipse { "Elliptical Marquee" } else { "Rectangular Marquee" }, |doc, _| {
                     let area = doc.bounds();
                     // A marquee dragged past the canvas stops at its edge (Photoshop); the ellipse
                     // keeps the dragged shape and is only cut there.
@@ -824,10 +824,11 @@ fn build() -> Vec<CommandSpec> {
             params: r##"{"x":i32,"y":i32}"##,
             enabled: has_doc,
             run: |s, p| {
-                let x = int(p, "x").unwrap_or(0) as i32;
-                let y = int(p, "y").unwrap_or(0) as i32;
+                let coord = |k: &str| i32::try_from(int(p, k).unwrap_or(0)).map_err(|_| bad("document.pixel", format!("{k} must fit in 32 bits")));
+                let (x, y) = (coord("x")?, coord("y")?);
                 let d = s.active().ok_or(EngineError::NoDocument)?;
-                let px = photocraft_compose::render(&d.doc, Rect::from_xywh(x, y, 1, 1)).px[0];
+                // At i32::MAX the 1x1 rect saturates to empty: a pixel that far out is transparent.
+                let px = photocraft_compose::render(&d.doc, Rect::from_xywh(x, y, 1, 1)).px.first().copied().unwrap_or_default();
                 Ok(json!(px))
             },
             journal: false,
@@ -941,6 +942,8 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::transform_cmds::specs());
     v.extend(crate::vector_cmds::specs());
     v.extend(crate::smartselect_cmds::specs());
+    v.extend(crate::cutout_cmds::specs());
+    v.extend(crate::symmetry_cmds::specs());
     v.extend(crate::edit_cmds::specs());
     v.extend(crate::color_cmds::specs());
     v.extend(crate::brush_cmds::specs());
@@ -962,6 +965,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::prefs::specs());
     v.extend(crate::edit_menu_cmds::specs());
     v.extend(crate::fill_key_cmds::specs());
+    v.extend(crate::stamp_cmds::specs());
     v.extend(crate::align_cmds::specs());
     v.extend(crate::photo_cmds::specs());
     v.extend(crate::lens_cmds::specs());
@@ -986,6 +990,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::automate_cmds::specs());
     v.extend(crate::print_cmds::specs());
     v.extend(crate::pick_cmds::specs());
+    v.extend(crate::layer_nav_cmds::specs());
     v.extend(crate::frame_cmds::specs());
     v.extend(crate::migrate_cmds::specs());
     v.extend(crate::trap_cmds::specs());

@@ -12,6 +12,17 @@ fn px(s: &mut Session, x: i32, y: i32) -> Vec<f32> {
 }
 
 #[test]
+fn document_pixel_at_the_coordinate_limits() {
+    let mut s = session_with_doc();
+    // The last representable column used to panic (its 1x1 rect saturated to empty).
+    assert_eq!(px(&mut s, i32::MAX, 0), vec![0.0; 4]);
+    assert_eq!(px(&mut s, i32::MIN, i32::MAX), vec![0.0; 4]);
+    // Values beyond i32 used to wrap around onto the canvas (2^32 read column 0).
+    let e = s.execute("document.pixel", json!({"x": 1i64 << 32, "y": 0})).unwrap_err();
+    assert!(matches!(e, EngineError::BadParams { .. }), "{e}");
+}
+
+#[test]
 fn command_ids_are_unique_and_documented() {
     let mut seen = std::collections::HashSet::new();
     for c in command_specs() {
@@ -149,6 +160,73 @@ fn marquee_dragged_past_the_canvas_stops_at_its_edge() {
     // Entirely off the canvas: nothing is selected.
     s.execute("select.rect", json!({"x": 100, "y": 100, "width": 20, "height": 20})).unwrap();
     assert_eq!(bounds(&mut s), Value::Null);
+}
+
+#[test]
+fn marquee_steps_are_named_after_their_tool() {
+    // #513: the elliptical marquee shares `select.rect` but records its own step name.
+    let mut s = session_with_doc();
+    let last = |s: &Session| s.active().unwrap().history.undo_label().map(str::to_string);
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 20, "height": 10, "ellipse": true})).unwrap();
+    assert_eq!(last(&s).as_deref(), Some("Elliptical Marquee"));
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 20, "height": 10})).unwrap();
+    assert_eq!(last(&s).as_deref(), Some("Rectangular Marquee"));
+}
+
+#[test]
+fn undo_and_redo_restore_the_targeted_layers() {
+    // #495: each history state brings back the layers it targeted when it was created.
+    let mut s = session_with_doc();
+    let target = |s: &Session| {
+        let st = s.active().unwrap();
+        (st.active_layer.unwrap(), st.selected_layers())
+    };
+    let select = |s: &mut Session, id: LayerId, mode: &str| {
+        let steps = s.active().unwrap().history.past_len();
+        s.execute("layer.select", json!({"layer": id.0, "mode": mode})).unwrap();
+        assert_eq!(s.active().unwrap().history.past_len(), steps, "selecting is not a step");
+    };
+    let bg = target(&s).0;
+    s.execute("layer.new.layer", json!({})).unwrap();
+    let new = target(&s).0;
+    assert!(s.undo());
+    assert_eq!(target(&s), (bg, vec![bg]), "the new document's target");
+    assert!(s.redo());
+    assert_eq!(target(&s), (new, vec![new]), "redo targets the new layer again");
+    // So Fill paints the new layer, not the background.
+    s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    let doc = &s.active().unwrap().doc;
+    assert!(!doc.layer(new).unwrap().surface().unwrap().content_bounds().is_empty());
+    let mut v = [0.0f32; 4];
+    doc.layer(bg).unwrap().surface().unwrap().read_pixel(5, 5, &mut v);
+    assert_eq!(v, [1.0; 4], "the background is untouched");
+    // Selecting another layer doesn't change what a state targets: undo returns to New Layer's
+    // target and redo to Fill's.
+    select(&mut s, bg, "replace");
+    assert!(s.undo());
+    assert_eq!(target(&s), (new, vec![new]));
+    select(&mut s, bg, "replace");
+    assert!(s.redo());
+    assert_eq!(target(&s), (new, vec![new]), "redo targets the filled layer");
+    // Undoing a delete targets the restored layer.
+    s.execute("layer.delete", json!({})).unwrap();
+    assert_eq!(target(&s).0, bg);
+    assert!(s.undo());
+    assert_eq!(target(&s), (new, vec![new]));
+    // A multi-layer target comes back too: a step taken with both layers selected...
+    select(&mut s, bg, "add");
+    s.execute("select.all", json!({})).unwrap();
+    s.execute("layer.new.layer", json!({})).unwrap();
+    assert!(s.undo());
+    assert_eq!(target(&s), (bg, vec![bg, new]));
+    // ...and the copies a multi-layer duplicate selects after its edit.
+    s.execute("layer.duplicate", json!({})).unwrap();
+    let copies = target(&s);
+    assert_eq!(copies.1.len(), 2);
+    select(&mut s, bg, "replace");
+    assert!(s.undo());
+    assert!(s.redo());
+    assert_eq!(target(&s), copies);
 }
 
 #[test]

@@ -27,8 +27,10 @@ pub mod brush_preview;
 pub mod brush_resize;
 pub mod brush_sections;
 pub mod brushes_tab;
+mod camera_raw_scope_ui;
 pub mod camera_raw_ui;
 pub mod canvas;
+pub mod canvas_tool_menu;
 pub mod channel_view;
 pub mod channels_panel;
 pub mod chrome_ui;
@@ -60,6 +62,7 @@ mod icon_data;
 pub mod icons;
 pub mod jobs_ui;
 pub mod layer_menu_ui;
+pub mod layer_pick_ui;
 pub mod layer_props_ui;
 mod layer_reveal;
 pub mod layer_row_ui;
@@ -71,17 +74,21 @@ pub mod mask_thumbs_ui;
 pub mod menu_catalog;
 pub mod menu_nav;
 pub mod menus;
+pub mod monitor_status;
 pub mod move_mods;
 pub mod move_ui;
 pub mod new_doc_ui;
 pub mod notices;
+mod opacity_keys;
 pub mod outline;
 pub mod paint_mouse;
 pub mod palette;
 pub mod panels;
 pub mod parity;
+pub mod patch_preview;
 pub mod perspective_ui;
 pub mod plugin_ui;
+pub mod point_curve;
 pub mod prefs_ui;
 pub mod preset_files_ui;
 pub mod preset_panels;
@@ -90,7 +97,9 @@ pub mod proxy;
 pub mod puppet_ui;
 pub mod rasterize_prompt;
 pub mod retouch_ui;
+mod rgb_histogram;
 pub mod rulers;
+pub mod scrollbars;
 pub mod shortcut_dispatch;
 pub mod shortcuts;
 mod sizing;
@@ -113,6 +122,7 @@ pub mod type_tool;
 mod variables_ui;
 pub mod vector_ui;
 pub mod view_cmds;
+pub mod wheel_nav;
 pub mod wide_angle_ui;
 pub mod widgets;
 pub mod work_area;
@@ -141,7 +151,11 @@ pub struct ExportSettings {
 
 /// Encode a document: (file bytes, warnings about anything approximated or dropped).
 pub type ExportFn = Box<dyn Fn(&Document, &str, &ExportSettings) -> Result<(Vec<u8>, Vec<String>), String>>;
-pub type PickOpenFn = Box<dyn FnMut() -> Option<(String, Vec<u8>)>>;
+/// The picked file's name and its bytes, or why it could not be read (shown like any other open
+/// failure); `None` when the dialog was cancelled.
+pub type PickOpenFn = Box<dyn FnMut() -> Option<(String, Result<Vec<u8>, String>)>>;
+/// File › Open's multi-file picker: the selected paths, `None` when cancelled.
+pub type PickOpenPathsFn = Box<dyn FnMut() -> Option<Vec<String>>>;
 pub type PickSaveFn = Box<dyn FnMut(&str) -> Option<String>>;
 pub type WriteFn = Box<dyn FnMut(&str, &[u8]) -> Result<(), String>>;
 /// Read bytes through the desktop control session's authorized read root.
@@ -167,8 +181,21 @@ pub type SaveTextFn = Box<dyn FnMut(&str) -> Result<(), String>>;
 pub type AutosaveFn = Box<dyn FnMut(&std::sync::Arc<Document>, u64, Option<&str>) -> Result<(), String>>;
 /// Drop the recovery data of a document (by `DocId` value) once it is saved or closed.
 pub type DiscardAutosaveFn = Box<dyn FnMut(u64)>;
-/// Load recoverable documents left by a previous session: (original path, document).
-pub type RecoverFn = Box<dyn FnMut() -> Vec<(Option<String>, Document)>>;
+/// Load recoverable documents left by a previous session. Their recovery data stays until the
+/// documents are saved or closed.
+pub type RecoverFn = Box<dyn FnMut() -> Vec<Recovered>>;
+/// A recovered document (by `DocId` value, once open) takes over its recovery entry (by key):
+/// its autosaves replace the entry, and saving or closing it drops the entry.
+pub type AdoptAutosaveFn = Box<dyn FnMut(u64, &str)>;
+
+/// A document [`RecoverFn`] found.
+pub struct Recovered {
+    /// The recovery entry it was loaded from (see [`AdoptAutosaveFn`]).
+    pub key: String,
+    /// Where the user last saved it, if anywhere.
+    pub path: Option<String>,
+    pub doc: Document,
+}
 /// Append text to a file (History Log).
 pub type AppendTextFn = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 /// Requests from the operating system since the last call (see [`OsEvent`]).
@@ -182,8 +209,10 @@ pub struct Services {
     pub import: Option<ImportFn>,
     /// Encode a document for a file name (format chosen by extension).
     pub export: Option<ExportFn>,
-    /// Show an "open file" dialog; returns (name, bytes).
+    /// Show a single-file picker for commands that import one file (Open As, presets, scripts).
     pub pick_open: Option<PickOpenFn>,
+    /// Show File › Open's multi-file picker; returns the selected paths.
+    pub pick_open_paths: Option<PickOpenPathsFn>,
     /// Show a "save file" dialog; returns a path/name to write.
     pub pick_save: Option<PickSaveFn>,
     /// Write bytes to a path (native) or trigger a download (web).
@@ -206,10 +235,13 @@ pub struct Services {
     /// the web (see `prefs_ui`).
     pub load_prefs: Option<LoadTextFn>,
     pub save_prefs: Option<SaveTextFn>,
+    /// The native window is connected directly to a Wayland compositor.
+    pub is_wayland: bool,
     /// Crash-recovery autosave (Preferences › File Handling) and recovery at launch.
     pub autosave: Option<AutosaveFn>,
     pub discard_autosave: Option<DiscardAutosaveFn>,
     pub recover: Option<RecoverFn>,
+    pub adopt_autosave: Option<AdoptAutosaveFn>,
     /// History Log text file output.
     pub append_text: Option<AppendTextFn>,
     /// OS requests (macOS open-documents / quit Apple events), polled every frame.
@@ -218,13 +250,20 @@ pub struct Services {
     /// `photocraft_engine::preset_store`). Attached to the session once it arrives; without
     /// one, brush presets are session-only (web, tests).
     pub preset_store: Option<std::sync::mpsc::Receiver<photocraft_engine::preset_store::Opened>>,
+    /// Reads the displays and their ICC profiles in the background (desktop macOS; see
+    /// `monitor_status`). Without one, the canvas uses the profile chosen in Color Settings, or sRGB.
+    pub read_displays: Option<monitor_status::ReadDisplaysFn>,
 }
 
 pub struct PhotocraftApp {
     pub session: Session,
     pub ui: UiState,
     pub services: Services,
-    canvases: HashMap<DocId, canvas::CanvasCache>,
+    /// Canvas caches per (document, display): CPU textures hold monitor values; the GPU
+    /// canvas state is shared (`canvas::GPU_OUTPUT`).
+    canvases: HashMap<(DocId, u32), canvas::CanvasCache>,
+    /// Display profile readings (#569).
+    monitors: monitor_status::State,
     checker: Option<egui::TextureHandle>,
     drag: Option<canvas::Drag>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
@@ -233,6 +272,8 @@ pub struct PhotocraftApp {
     trail: Option<stroke_trail::Trail>,
     /// Move tool drag shown live (`move_ui`).
     pub(crate) move_preview: Option<move_ui::MovePreview>,
+    /// Patch Tool drag: the healed document at the pointer (`patch_preview`).
+    pub(crate) patch_preview: Option<patch_preview::PatchPreview>,
     /// The next tool `Down` is a right-button drag that erases (see `paint_mouse`).
     secondary_erase: bool,
     /// While a batch of recovered pointer samples is replayed, defer the live-stroke update to one
@@ -242,6 +283,14 @@ pub struct PhotocraftApp {
     last_stroke_end: Option<(DocId, [f64; 2])>,
     /// Control+Alt-drag brush resize in progress (`brush_resize`, #231).
     pub(crate) brush_resize: Option<brush_resize::Resize>,
+    /// The next tool `Down` is an Alt+right-drag that resizes the brush (#297). `tool_event`
+    /// takes it on every event, so a press another handler consumes can't leave it set.
+    pub(crate) brush_resize_armed: bool,
+    /// This press began with ⌥ (Alt) held on a painting tool, so it samples colours instead of
+    /// painting until it is released (`canvas::alt_eyedropper`, #417).
+    pub(crate) alt_sampling: bool,
+    /// The first digit of a two-digit opacity typed on the number keys (`opacity_keys`, #352).
+    pub(crate) opacity_keys: opacity_keys::Pending,
     control_rx: Option<Receiver<ControlRequest>>,
     pending_screenshots: Vec<(u64, Option<String>, Sender<ControlResponse>)>,
     /// Screenshots not yet requested from the viewport: (token, earliest time in ms, frames seen).
@@ -291,8 +340,8 @@ pub struct PhotocraftApp {
     pub(crate) transform_preview: Option<transform_tool::TransformPreview>,
     /// Move-tool ⇧/⌥ drag state (move_mods).
     pub(crate) move_mods: move_mods::MoveDrag,
-    /// Live Layer Style dialog preview: (key over revision + style fields, document with the style applied).
-    pub(crate) style_preview: Option<(u64, Option<std::sync::Arc<Document>>)>,
+    /// Live Layer Style dialog preview: (key over revision + style fields, preview or validation error).
+    pub(crate) style_preview: Option<(u64, Result<std::sync::Arc<Document>, String>)>,
     /// Liquify dialog, Puppet Warp and Perspective Warp sessions (distort_ui).
     pub(crate) distort: distort_ui::Distort,
     /// Gradient tool live-mode drags and previews (gradient_ui).
@@ -357,15 +406,20 @@ impl PhotocraftApp {
             ui: UiState::default(),
             services,
             canvases: HashMap::new(),
+            monitors: Default::default(),
             checker: None,
             drag: None,
             live_stroke: None,
             trail: None,
             move_preview: None,
+            patch_preview: None,
             secondary_erase: false,
             defer_live_stroke: false,
             last_stroke_end: None,
             brush_resize: None,
+            brush_resize_armed: false,
+            alt_sampling: false,
+            opacity_keys: None,
             control_rx: None,
             pending_screenshots: Vec::new(),
             queued_screenshots: Vec::new(),
@@ -422,6 +476,7 @@ impl PhotocraftApp {
         };
         // Saved preferences (and recovered documents) are in place before the first frame.
         prefs_ui::load(&mut app);
+        notices::wayland_file_drop_guidance(&mut app);
         // File › Scripts › Script Events Manager: "Start Application".
         photocraft_engine::automate_cmds::fire_event(&mut app.session, "startApplication");
         app
@@ -432,8 +487,22 @@ impl PhotocraftApp {
     pub fn set_wgpu(&mut self, rs: eframe::egui_wgpu::RenderState) {
         // Preferences › Performance › cache tile size (PHOTOCRAFT_GPU_TILE still overrides).
         let tile = self.session.prefs().performance.cache_tile_size;
-        let gpu = gpu_canvas::GpuCanvas::with_tile(&rs, Some(tile));
-        self.perf.gpu_info.set_adapter(&gpu.adapter_info());
+        // Escaped driver/setup panics must leave the session and CPU canvas alive.
+        self.perf.gpu_info.set_adapter(&rs.adapter.get_info());
+        let gpu = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gpu_canvas::GpuCanvas::with_tile(&rs, Some(tile)))) {
+            Ok(gpu) => gpu,
+            Err(payload) => {
+                let detail = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                    .unwrap_or_else(|| "GPU canvas initialization failed".into());
+                self.perf.gpu_info.canvas = "cpu".into();
+                self.perf.gpu_info.fallback = Some(detail.clone());
+                gpu_status::queue_fallback_notice(self, detail);
+                return;
+            }
+        };
         self.perf.gpu_info.canvas = "gpu".into();
         self.gpu = Some(gpu);
         self.prefs_rt.gpu_style = None;
@@ -476,17 +545,20 @@ impl PhotocraftApp {
         {
             authorize(id, &params)?;
         }
+        if let Some(r) = transform_tool::intercept(self, id) {
+            return r;
+        }
         let suppress_events = self.automation_input && self.session.prefs().script_events.enabled;
         if suppress_events {
             self.session.edit_prefs(|prefs| prefs.script_events.enabled = false);
         }
         let t0 = gpu_canvas::now_ms();
         // The OS clipboard is read only on an explicit paste, never in the background (privacy, CPU).
-        if matches!(id, "edit.paste" | "edit.pasteSpecial.pasteInPlace") {
+        if matches!(id, "edit.paste" | "edit.pasteSpecial.pasteInPlace" | "file.newFromClipboard") {
             if !clip_read {
                 self.import_os_clipboard();
             }
-            if self.session.clipboard.is_none() && self.session.active().is_some() && self.services.clipboard_get_image.is_some() {
+            if self.session.clipboard.is_none() && self.services.clipboard_get_image.is_some() {
                 // Enabled on the strength of the OS clipboard, which held no image: a quiet no-op.
                 self.ui.status = "Nothing to paste: the clipboard holds no image".into();
                 self.ui.status_error = false;
@@ -637,30 +709,26 @@ impl PhotocraftApp {
         Ok(warnings)
     }
 
-    /// Run one engine command on behalf of automation while suppressing
-    /// user-configured script-event file reads. Interactive commands retain
-    /// their normal event behavior.
-    pub fn run_automation(&mut self, id: &str, params: Value) -> Result<Value, String> {
-        let events_enabled = self.session.prefs().script_events.enabled;
-        if events_enabled {
-            self.session.edit_prefs(|prefs| prefs.script_events.enabled = false);
-        }
-        let result = self.run(id, params);
-        if events_enabled {
-            self.session.edit_prefs(|prefs| prefs.script_events.enabled = true);
-        }
-        result
-    }
-
-    /// File › Open: the platform dialog returns the chosen file's path (native; the web delivers
-    /// picks through the inbox instead).
+    /// File › Open: native platforms return all selected paths; the web delivers its pick through
+    /// the single-file service/inbox instead.
     pub fn open_dialog_file(&mut self) {
-        let picked = self.services.pick_open.as_mut().and_then(|f| f());
-        if let Some((path, bytes)) = picked
-            && let Err(e) = self.open_file(&path, &bytes)
-        {
+        if let Some(pick_paths) = self.services.pick_open_paths.as_mut() {
+            if let Some(paths) = pick_paths() {
+                self.open_paths(&paths);
+            }
+            return;
+        }
+        let Some((path, bytes)) = self.services.pick_open.as_mut().and_then(|f| f()) else { return };
+        if let Err(e) = bytes.and_then(|bytes| self.open_file(&path, &bytes)) {
             self.open_failed(&file_open::display_name(&path), &e);
         }
+    }
+
+    /// Show the open dialog for a file a command reads (a script, notes, a placed image, presets):
+    /// `None` when cancelled, else its name and bytes or the read error.
+    pub(crate) fn pick_file_bytes(&mut self) -> Option<Result<(String, Vec<u8>), String>> {
+        let (name, bytes) = self.services.pick_open.as_mut().and_then(|f| f())?;
+        Some(bytes.map(|b| (name.clone(), b)).map_err(|e| format!("{}: {e}", file_open::display_name(&name))))
     }
 
     /// Save the active document to `path` (or a path chosen in the save dialog); returns the path
@@ -704,7 +772,10 @@ impl PhotocraftApp {
     /// written and the export warnings (also shown to the user).
     pub fn save_automation(&mut self, path: Option<String>) -> Result<(String, Vec<String>), String> {
         let state = self.session.active().ok_or("no document")?;
-        let target = path.or_else(|| state.path.clone()).ok_or("document has no relative path; pass `path`")?;
+        // As File › Save: without `path` only a layered file is written back (#416).
+        let target = path
+            .or_else(|| state.path.clone().filter(|p| photocraft_engine::file_cmds::saves_in_place(p)))
+            .ok_or("pass `path`: a save without one writes back only to the document's own PSD, PSB or .pcraft file")?;
         let export = self.services.export.as_ref().ok_or("no exporter configured")?;
         let (bytes, warnings) = export(&state.doc, &target, &ExportSettings::default())?;
         let write = self.services.automation_write.as_mut().ok_or("automation write authority is not configured")?;
@@ -810,15 +881,13 @@ impl eframe::App for PhotocraftApp {
         if self.ui.pen.is_some() && self.ui.tool != state::Tool::Pen {
             vector_ui::pen_commit(self, false);
         }
-        // A transform whose layer or document went away (undo, close) ends silently.
-        if let Some(t) = &self.ui.transform
-            && self.session.active().and_then(|s| s.doc.layer(photocraft_doc::LayerId(t.layer))).is_none()
-        {
-            transform_tool::cancel(self);
-        }
+        transform_tool::end_if_left(self);
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
         prefs_ui::tick(self, ctx);
+        monitor_status::poll(self, ctx);
+        // Control requests and persisted preferences can change the language in this frame.
+        i18n::sync_context(ctx, &self.session.prefs().interface.language);
         // A window bigger than its display (1440 × 900 on 1366 × 768) runs under the taskbar:
         // maximize it into the work area once (#315).
         work_area::fit_window(ctx);
@@ -852,6 +921,7 @@ impl eframe::App for PhotocraftApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        i18n::set_current(i18n::Lang::from_pref(&self.session.prefs().interface.language));
         // Fonts registered via set_fonts only take effect next frame; named families would panic now.
         if !self.fonts_ready {
             ctx.request_repaint();
@@ -900,6 +970,7 @@ impl eframe::App for PhotocraftApp {
         wide_angle_ui::show(self, &ctx);
         canvas::extra_windows(self, &ctx);
         notices::show(self, &ctx);
+        gpu_status::show_fallback(self, &ctx);
         // A device lost while drawing this frame: switch to the CPU canvas before the next one.
         gpu_status::check(self, &ctx);
         self.automation_input = false;
@@ -1236,10 +1307,19 @@ mod input_tests;
 mod pencil_tests;
 
 #[cfg(test)]
+mod transform_undo_tests;
+
+#[cfg(test)]
 mod move_auto_select_tests;
 
 #[cfg(test)]
 mod marquee_tests;
+
+#[cfg(test)]
+mod stamp_tests;
+
+#[cfg(test)]
+mod polygon_lasso_tests;
 
 #[cfg(test)]
 mod clipboard_tests {
@@ -1308,6 +1388,40 @@ mod clipboard_tests {
         let mut plain = PhotocraftApp::new(Session::new(), Services::default());
         plain.session.execute("file.new", serde_json::json!({"width": 8, "height": 8})).unwrap();
         assert!(!crate::menus::is_enabled(&plain, "edit.paste"));
+    }
+
+    /// #368: an image copied in another app opens as a document of its own, from File › New
+    /// from Clipboard or from Paste with nothing open.
+    #[test]
+    fn os_clipboard_image_becomes_a_new_document() {
+        let (os, reads) = (OsClip::default(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let (b, n) = (os.clone(), Arc::clone(&reads));
+        let get = move || {
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            b.lock().unwrap().clone()
+        };
+        let mut app = PhotocraftApp::new(Session::new(), Services { clipboard_get_image: Some(Box::new(get)), ..Default::default() });
+        let ctx = egui::Context::default();
+        // Listed right after File › New…, enabled without reading the clipboard.
+        let items = crate::menus::menu_items(&app);
+        let at = items.iter().position(|i| i.id == "file.new").unwrap();
+        assert_eq!(items[at + 1].id, "file.newFromClipboard");
+        assert!(items[at + 1].enabled && crate::menus::is_enabled(&app, "edit.paste"));
+        assert!(!crate::menus::is_enabled(&app, "edit.pasteSpecial.pasteInPlace"), "Paste in Place needs a document");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // An empty clipboard is a quiet no-op.
+        let r = crate::menus::invoke(&mut app, &ctx, "file.newFromClipboard", serde_json::json!({})).unwrap();
+        assert_eq!(r["pasted"], serde_json::json!(false));
+        assert!(app.session.documents().is_empty() && !app.ui.status_error);
+        // Paste with nothing open makes the document.
+        *os.lock().unwrap() = Some((5, 3, [0u8, 0, 255, 255].repeat(15)));
+        crate::menus::invoke(&mut app, &ctx, "edit.paste", serde_json::json!({})).unwrap();
+        let d = &app.session.active().unwrap().doc;
+        assert_eq!((d.size.width, d.size.height, d.layers.len()), (5, 3, 1));
+        assert_eq!(app.ui.views.len(), 1, "the new document has a view");
+        // New from Clipboard with a document open adds another.
+        crate::menus::invoke(&mut app, &ctx, "file.newFromClipboard", serde_json::json!({})).unwrap();
+        assert_eq!(app.session.documents().len(), 2);
     }
 
     #[test]

@@ -152,13 +152,8 @@ pub fn value_field(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive
             ui.style_mut().visuals.widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
             ui.style_mut().override_font_id = Some(theme::mono(12.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_sized(
-                    field.size(),
-                    egui::DragValue::new(value)
-                        .range(range)
-                        .speed(if fine { 0.01 } else { 0.5 })
-                        .custom_formatter(|v, _| if fine { fmt_num2(v) } else { fmt_num(v) }),
-                )
+                let layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
+                ui.allocate_ui_with_layout(field.size(), layout, |ui| number_edit(ui, value, range, fine)).inner
             })
             .inner
         }
@@ -166,6 +161,36 @@ pub fn value_field(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive
     if !suffix.is_empty() {
         ui.painter().text(pos2(rect.right() - 6.0, rect.center().y), Align2::RIGHT_CENTER, suffix, theme::mono(11.0), t.text_faint);
     }
+    resp
+}
+
+/// The number in a [`value_field`]. A typed number applies as it's typed; arithmetic waits for
+/// Enter, Tab or click-away, because per keystroke `5/2` would land first and a caller that
+/// rounds it would cut `5/2*2` short. `changed()` means a new value, not just a keystroke.
+fn number_edit(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, fine: bool) -> Response {
+    let (id, ctx) = (ui.next_auto_id(), ui.ctx().clone());
+    let held = id.with("arithmetic");
+    let math = ui.memory(|m| m.has_focus(id)) && ui.data(|d| d.get_temp(held)).unwrap_or(false);
+    ui.data_mut(|d| d.insert_temp(held, math));
+    let before = *value;
+    let mut resp = ui.add(
+        egui::DragValue::new(value)
+            .range(range)
+            .speed(if fine { 0.01 } else { 0.5 })
+            .custom_formatter(move |v, _| if fine { fmt_num2(v) } else { fmt_num(v) })
+            .update_while_editing(!math)
+            // Focus is read when parsing, not above: Tab hands it on inside `ui.add`.
+            .custom_parser(move |s| {
+                let v = parse_num(s);
+                if ctx.memory(|m| m.has_focus(id)) && plain(s).is_none() {
+                    // Still typing arithmetic: hold it, and stop applying keystrokes once it parses.
+                    ctx.data_mut(|d| d.insert_temp(held, v.is_some()));
+                    return None;
+                }
+                v
+            }),
+    );
+    resp.flags.set(egui::response::Flags::CHANGED, *value != before);
     resp
 }
 
@@ -299,6 +324,11 @@ fn button_impl(ui: &mut Ui, label: &str, min_width: f32, bg: Color32, fg: Color3
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     // Painted text: name the button for accessibility (and so tests and agents can find it).
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
+    if resp.has_focus() {
+        // Keyboard focus (Tab); clicks don't focus egui buttons.
+        let r = if t.pro { h / 2.0 } else { t.radius_sm } + 2.0;
+        ui.painter().rect_stroke(rect.expand(2.0), r, Stroke::new(2.0, t.accent), StrokeKind::Outside);
+    }
     if t.pro {
         // Spectrum buttons: fully rounded; primary = filled accent, secondary = outline.
         let down = resp.is_pointer_button_down_on();
@@ -334,6 +364,17 @@ fn button_impl(ui: &mut Ui, label: &str, min_width: f32, bg: Color32, fg: Color3
     }
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
     resp
+}
+
+/// Cached RGB data; drawing work is bounded by the 256 display bins, never the image size.
+pub fn rgb_histogram(ui: &mut Ui, histogram: &photocraft_algo::histogram::RgbHistogram, height: f32) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(1.0), height.max(1.0)), egui::Sense::hover());
+    ui.painter().rect_filled(rect, t.radius_sm, t.histogram_background());
+    let plot = rect.shrink(4.0);
+    crate::rgb_histogram::paint(ui.painter(), plot, histogram, &t);
+    ui.painter().rect_stroke(rect, t.radius_sm, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+    response
 }
 
 /// Small caps section label.
@@ -379,6 +420,53 @@ pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &mut T, op
             }
         }
     });
+    changed
+}
+
+/// The colour picker popup of a colour swatch: a click on `swatch` toggles it, a click outside
+/// closes it. While open, its left edge stays where it first showed (at the swatch, or further
+/// left when the window edge needs it), below the swatch or above it as room allows. The picker's
+/// width follows its value readouts, and placing it anew every frame moved it under the pointer,
+/// flipping it from side to side near the right edge of the window (#534).
+pub fn swatch_popup(swatch: &Response) -> egui::Popup<'static> {
+    // Room for the readouts to widen after the picker opened.
+    const SLACK: f32 = 32.0;
+    let popup = egui::Popup::from_toggle_button_response(swatch).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let ctx = &swatch.ctx;
+    let key = popup.get_id().with("left");
+    if !popup.is_open() {
+        ctx.data_mut(|d| d.remove::<f32>(key));
+        return popup;
+    }
+    // Its width is known from the frame after it opened (egui sizes it unseen first).
+    let left = ctx.data(|d| d.get_temp::<f32>(key)).or_else(|| {
+        let width = popup.get_expected_size()?.x;
+        let screen = ctx.content_rect();
+        let left = swatch.rect.left().min(screen.right() - width - SLACK).max(screen.left());
+        ctx.data_mut(|d| d.insert_temp(key, left));
+        Some(left)
+    });
+    let Some(left) = left else { return popup };
+    popup
+        .anchor(Rect::from_x_y_ranges(left..=left, swatch.rect.y_range()))
+        .align(egui::RectAlign::BOTTOM_START)
+        .align_alternatives(&[egui::RectAlign::TOP_START])
+}
+
+pub fn dropdown_with_tooltips<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &mut T, options: &[(T, &str, &str)], width: f32) -> bool {
+    let label = options.iter().find(|(v, _, _)| v == current).map(|(_, l, _)| tl!(l)).unwrap_or("—");
+    let mut changed = false;
+    let response = egui::ComboBox::from_id_salt(id).selected_text(label).width(width).height(420.0).icon(chevron_icon).show_ui(ui, |ui| {
+        for (v, l, tip) in options {
+            if ui.selectable_label(v == current, tl!(l)).on_hover_text(tl!(tip)).clicked() {
+                *current = v.clone();
+                changed = true;
+            }
+        }
+    });
+    if let Some((_, _, tip)) = options.iter().find(|(v, _, _)| v == current) {
+        let _ = response.response.on_hover_text(tl!(tip));
+    }
     changed
 }
 
@@ -448,6 +536,47 @@ pub fn fmt_num2(v: f64) -> String {
     format!("{r:.2}").trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// Parses a typed number or simple arithmetic such as `1280*2` or `20*2+5-2` (`+ - * /`,
+/// `*` and `/` first). Like egui's own parser it ignores whitespace and reads `−` as `-`.
+/// `None` for anything else, including a division by zero.
+pub fn parse_num(text: &str) -> Option<f64> {
+    let s = clean(text);
+    s.parse().ok().or_else(|| sum(&s)).filter(|v: &f64| v.is_finite())
+}
+
+/// A plain typed number, no arithmetic.
+fn plain(text: &str) -> Option<f64> {
+    clean(text).parse().ok()
+}
+
+fn clean(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).map(|c| if c == '−' { '-' } else { c }).collect()
+}
+
+/// `a+b-c…`: a `+` or `-` right after an operand splits terms; anywhere else it is a sign.
+fn sum(s: &str) -> Option<f64> {
+    let (mut total, mut sign, mut start, mut prev) = (0.0, 1.0, 0, ' ');
+    for (i, c) in s.char_indices() {
+        if matches!(c, '+' | '-') && i > start && !matches!(prev, '*' | '/' | 'e' | 'E') {
+            total += sign * product(s.get(start..i)?)?;
+            sign = if c == '-' { -1.0 } else { 1.0 };
+            start = i + 1;
+        }
+        prev = c;
+    }
+    Some(total + sign * product(s.get(start..)?)?)
+}
+
+/// `a*b/c…`, left to right.
+fn product(s: &str) -> Option<f64> {
+    let mut factors = s.split(['*', '/']).map(str::parse::<f64>);
+    let mut acc = factors.next()?.ok()?;
+    for (op, x) in s.matches(['*', '/']).zip(factors) {
+        acc = if op == "*" { acc * x.ok()? } else { acc / x.ok()? };
+    }
+    Some(acc)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -456,6 +585,93 @@ mod tests {
         assert_eq!(super::fmt_num2(0.78), "0.78");
         assert_eq!(super::fmt_num2(0.5), "0.5");
         assert_eq!(super::fmt_num2(2.0), "2");
+    }
+
+    #[test]
+    fn typed_arithmetic_evaluates() {
+        use super::parse_num;
+        for (text, want) in [
+            ("1280*2", 2560.0),
+            ("658 * 1.5", 987.0),
+            ("48/3", 16.0),
+            ("20*2+5-2", 43.0),
+            ("2+3*4", 14.0),
+            ("10/4*2", 5.0),
+            ("-5+3", -2.0),
+            ("5--3", 8.0),
+            ("2*-3+1", -5.0),
+            ("−4", -4.0),
+            ("1 234", 1234.0),
+            ("1e3/2", 500.0),
+        ] {
+            assert_eq!(parse_num(text), Some(want), "{text}");
+        }
+        for text in ["", "abc", "5+", "*2", "4/0", "0/0", "1+*2", "(2+3)", "1e400"] {
+            assert_eq!(parse_num(text), None, "{text}");
+        }
+    }
+
+    /// Types `text` into a value field holding `start`, then presses `key`. Returns the value an OK
+    /// button that also fires on Enter saw, as dialogs read it, else the field's value. `round`
+    /// makes the caller round the value every frame, as pixel fields do.
+    fn type_and_press(start: f32, text: &str, key: egui::Key, round: bool) -> f32 {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut h = Harness::builder().with_size(egui::vec2(300.0, 100.0)).build_ui_state(
+            move |ui, (v, ok): &mut (f32, Option<f32>)| {
+                super::value_field(ui, v, 0.0..=300000.0, "px", 90.0);
+                if round {
+                    *v = v.round();
+                }
+                if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    *ok = Some(*v);
+                }
+            },
+            (start, None),
+        );
+        h.get_by_role(egui::accesskit::Role::SpinButton).click();
+        h.run();
+        for c in text.chars() {
+            h.event(egui::Event::Text(c.to_string()));
+            h.run();
+        }
+        h.key_press(key);
+        h.run();
+        let (v, ok) = *h.state();
+        ok.unwrap_or(v)
+    }
+
+    /// Plain digits apply as they're typed; arithmetic doesn't report a change until it's committed.
+    #[test]
+    fn value_field_holds_arithmetic_until_committed() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut h = Harness::builder().with_size(egui::vec2(300.0, 100.0)).build_ui_state(
+            |ui, (v, changes): &mut (f32, u32)| {
+                if super::value_field(ui, v, 0.0..=100.0, "%", 90.0).changed() {
+                    *changes += 1;
+                }
+            },
+            (100.0, 0),
+        );
+        h.get_by_role(egui::accesskit::Role::SpinButton).click();
+        h.run();
+        for (c, want) in [('5', (5.0, 1)), ('0', (50.0, 2)), ('/', (50.0, 2)), ('2', (50.0, 2))] {
+            h.event(egui::Event::Text(c.to_string()));
+            h.run();
+            assert_eq!(*h.state(), want, "after {c}");
+        }
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(*h.state(), (25.0, 3));
+    }
+
+    #[test]
+    fn value_field_applies_typed_arithmetic() {
+        use egui::Key::{Enter, Tab};
+        assert_eq!(type_and_press(500.0, "1280*2", Tab, false), 2560.0);
+        assert_eq!(type_and_press(500.0, "1280*2", Enter, false), 2560.0);
+        // `5/2` alone would round to 3 under the caller; the whole expression still applies.
+        assert_eq!(type_and_press(1.0, "5/2*2", Tab, true), 5.0);
+        assert_eq!(type_and_press(1.0, "1280/3*2", Enter, true), 853.0);
     }
 
     #[test]

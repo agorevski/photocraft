@@ -29,7 +29,7 @@ fn app_with(pick_open: Option<(String, Vec<u8>)>, pick_save: Option<String>) -> 
             let warnings = if path.ends_with(".png") { vec!["Layers were flattened".to_string()] } else { Vec::new() };
             Ok((b"out".to_vec(), warnings))
         })),
-        pick_open: Some(Box::new(move || pick_open.take())),
+        pick_open: Some(Box::new(move || pick_open.take().map(|(name, bytes)| (name, Ok(bytes))))),
         pick_save: Some(Box::new(move |_s: &str| pick_save.clone())),
         write: Some(Box::new(move |p: &str, b: &[u8]| {
             w.borrow_mut().push((p.to_string(), b.to_vec()));
@@ -75,6 +75,40 @@ fn file_open_dialog_sets_path_so_save_writes_in_place() {
     let r = menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
     assert_eq!(r["path"], "/pics/cat.psd");
     assert_eq!(written.borrow().last().map(|(p, _)| p.clone()).as_deref(), Some("/pics/cat.psd"));
+}
+
+#[test]
+fn file_open_dialog_opens_every_selected_path() {
+    let dir = std::env::temp_dir().join(format!("photocraft-issue-595-open-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let paths = ["one.psd", "two.png"].map(|name| {
+        let path = dir.join(name);
+        std::fs::write(&path, b"x").unwrap();
+        path.to_string_lossy().into_owned()
+    });
+    let (mut app, _) = app_with(None, None);
+    let selected = paths.to_vec();
+    app.services.pick_open_paths = Some(Box::new(move || Some(selected.clone())));
+
+    menus::invoke(&mut app, &egui::Context::default(), "file.open", json!({})).unwrap();
+
+    assert_eq!(app.session.documents().len(), 2);
+    assert_eq!(
+        app.session.documents().iter().map(|doc| doc.path.as_deref()).collect::<Vec<_>>(),
+        paths.iter().map(|path| Some(path.as_str())).collect::<Vec<_>>()
+    );
+    assert_eq!(app.ui.recent_files, vec![paths[1].clone(), paths[0].clone()]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cancelling_multi_file_open_does_not_fall_back_to_single_file_picker() {
+    let (mut app, _) = app_with(Some(("/pics/unexpected.psd".into(), b"x".to_vec())), None);
+    app.services.pick_open_paths = Some(Box::new(|| None));
+
+    menus::invoke(&mut app, &egui::Context::default(), "file.open", json!({})).unwrap();
+
+    assert!(app.session.documents().is_empty());
 }
 
 #[test]
@@ -141,6 +175,23 @@ fn open_failures_are_errors_and_leave_no_document() {
 }
 
 #[test]
+fn a_picked_file_that_cannot_be_read_is_reported_like_any_open_failure() {
+    let (mut app, _) = app_with(None, None);
+    let mut picked = Some(("C:/photos/big.psb".to_string(), Err("The parameter is incorrect. (os error 87)".to_string())));
+    app.services.pick_open = Some(Box::new(move || picked.take()));
+    app.open_dialog_file();
+    assert!(app.session.documents().is_empty());
+    assert!(app.ui.status_error);
+    let notice = app.ui.notices.last().unwrap();
+    assert!(notice.error && notice.title.contains("Couldn't open big.psb: The parameter is incorrect"), "{}", notice.title);
+    // Commands that read a picked file (scripts, notes, Place) get the same message as an error.
+    app.services.pick_open = Some(Box::new(|| Some(("C:/photos/big.psb".to_string(), Err("denied".to_string())))));
+    assert_eq!(app.pick_file_bytes(), Some(Err("big.psb: denied".to_string())));
+    app.services.pick_open = Some(Box::new(|| None));
+    assert_eq!(app.pick_file_bytes(), None, "cancelled");
+}
+
+#[test]
 fn open_paths_reports_each_failure_without_panicking() {
     let (mut app, _) = app_with(None, None);
     let missing = std::env::temp_dir().join("photocraft-definitely-missing-file.psd").to_string_lossy().to_string();
@@ -202,10 +253,15 @@ impl egui::DroppedFile for FakeDrop {
 #[test]
 fn dropped_files_open_with_path_and_recent() {
     let (mut app, _) = app_with(None, None);
-    let abs = std::env::temp_dir().join("dropped.psd");
+    let dir = std::env::temp_dir().join(format!("photocraft-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let abs = dir.join("dropped.psd");
+    std::fs::write(&abs, b"x").unwrap();
     let abs_s = abs.to_string_lossy().to_string();
     app.open_dropped(vec![
-        std::sync::Arc::new(FakeDrop(abs, Ok(b"x".to_vec()))),
+        // A desktop drop (absolute path) is read from disk like File › Open (#375), never through
+        // egui's whole-file `std::fs::read`.
+        std::sync::Arc::new(FakeDrop(abs, Err("egui's reader must not be used".into()))),
         // Unreadable and undecodable drops are errors; no path means no recent entry.
         std::sync::Arc::new(FakeDrop("gone.psd".into(), Err("permission denied".into()))),
         std::sync::Arc::new(FakeDrop("rel.psd".into(), Ok(b"x".to_vec()))),
@@ -218,13 +274,14 @@ fn dropped_files_open_with_path_and_recent() {
     assert_eq!(app.ui.recent_files, vec![abs_s]);
     assert!(app.ui.status_error);
     assert_eq!(app.ui.notices.iter().filter(|n| n.error).count(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn notices_are_capped_and_dismissable_state_round_trips() {
     let (mut app, _) = app_with(None, None);
     for i in 0..10 {
-        notices::post(&mut app, format!("n{i}"), vec![], false);
+        notices::post(&mut app, format!("n{i}"), vec![], false, None);
     }
     assert_eq!(app.ui.notices.len(), notices::MAX_NOTICES);
     assert_eq!(app.ui.notices.last().map(|n| n.title.as_str()), Some("n9"));
@@ -238,7 +295,7 @@ fn notices_are_capped_and_dismissable_state_round_trips() {
 #[test]
 fn notices_render_without_panicking() {
     let (mut app, _) = app_with(None, None);
-    notices::post(&mut app, "Opened a.psd with 9 warnings", (0..9).map(|i| format!("warning {i}")).collect(), false);
+    notices::post(&mut app, "Opened a.psd with 9 warnings", (0..9).map(|i| format!("warning {i}")).collect(), false, None);
     notices::error(&mut app, "Couldn't open b.psd: not an image".into());
     let ctx = egui::Context::default();
     let mut out = ctx.run_ui(Default::default(), |ui| notices::show(&mut app, ui.ctx()));

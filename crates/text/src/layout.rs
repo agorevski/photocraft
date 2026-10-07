@@ -274,6 +274,8 @@ impl TextLayout {
 
 const LRM: &str = "\u{200E}";
 const RLM: &str = "\u{200F}";
+/// A line break inside a paragraph (Shift+Return), stored as U+0003 in PSD type.
+pub(crate) const FORCED_LINE_BREAK: char = '\u{3}';
 
 pub(crate) struct Layouter {
     lcx: LayoutContext<RunBrush>,
@@ -364,6 +366,12 @@ impl Layouter {
             let mut ptext = String::with_capacity(prefix.len() + content.len());
             ptext.push_str(prefix);
             for (i, ch) in content.char_indices() {
+                // A forced line break ends the line but not the paragraph. The line breaker knows
+                // it as a newline, which has the same length, so text offsets don't move.
+                if ch == FORCED_LINE_BREAK {
+                    ptext.push('\n');
+                    continue;
+                }
                 let caps = out.styles[style_at(prange.start + i)].caps;
                 if caps == Caps::AllCaps {
                     let up: String = ch.to_uppercase().collect();
@@ -953,7 +961,12 @@ fn style_props(st: &CharStyle, k: f32, fallback: &[String], idx: u32) -> Vec<Sty
     if !st.font_family.is_empty() {
         fam.push(quote(&st.font_family));
     }
-    fam.extend(fallback.iter().map(|f| quote(f)));
+    // Serif runs fall back to a Mincho face for Japanese (craft-fonts), others to a Gothic one.
+    if crate::craft_fonts::is_serif_family(&st.font_family) {
+        fam.extend(crate::craft_fonts::mincho_first(fallback).iter().map(|f| quote(f)));
+    } else {
+        fam.extend(fallback.iter().map(|f| quote(f)));
+    }
     fam.push("sans-serif".into());
     let feats = feature_list(st);
     let vars: Vec<String> = st.variations.iter().filter(|v| v.axis.len() == 4 && v.axis.is_ascii()).map(|v| format!("\"{}\" {}", v.axis, v.value)).collect();
