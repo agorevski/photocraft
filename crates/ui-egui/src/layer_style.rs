@@ -612,7 +612,7 @@ mod tests {
         s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         let st = s.active().unwrap();
-        let mut f = initial_fields(st.doc.layer(st.active_layer.unwrap()).unwrap(), Some("colorOverlay"));
+        let mut f = initial_fields(st.doc.layer(st.active_layer.unwrap()).unwrap(), Some("colorOverlay"), st.doc.global_light.angle);
         f.insert("p:colorOverlay".into(), json!("invalid"));
 
         assert!(preview_document(&st.doc, &s.patterns, &f).is_err());
@@ -654,12 +654,12 @@ mod tests {
         app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
         app.run("layer.new.layer", json!({})).unwrap();
         let layer = app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap().clone();
-        let mut invalid = initial_fields(&layer, Some("colorOverlay"));
+        let mut invalid = initial_fields(&layer, Some("colorOverlay"), 0.0);
         invalid.insert("p:colorOverlay".into(), json!(null));
         assert!(confirm(&mut app, &invalid).is_err());
         assert!(app.session.active().unwrap().doc.layer(layer.id).unwrap().effects.items.is_empty());
 
-        let valid = initial_fields(&layer, Some("colorOverlay"));
+        let valid = initial_fields(&layer, Some("colorOverlay"), 0.0);
         confirm(&mut app, &valid).unwrap();
         assert_eq!(app.session.active().unwrap().doc.layer(layer.id).unwrap().effects.items.len(), 1);
     }
