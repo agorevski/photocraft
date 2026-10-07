@@ -165,6 +165,15 @@ fn straighten_layer_and_image() {
 }
 
 #[test]
+fn ruler_straightening_angle_uses_clockwise_screen_rotation() {
+    let ruler = photocraft_doc::Ruler { start: [0.0, 0.0], end: [20.0, 10.0], protractor: None };
+    assert!((ruler_straightening_angle(&ruler) + 26.565_051_177_078).abs() < 1e-9);
+
+    let ruler = photocraft_doc::Ruler { start: [0.0, 0.0], end: [20.0, -10.0], protractor: None };
+    assert!((ruler_straightening_angle(&ruler) - 26.565_051_177_078).abs() < 1e-9);
+}
+
+#[test]
 fn inscribed_rect() {
     let (w, h) = inscribed(100.0, 50.0, 0.0);
     assert!((w - 100.0).abs() < 1e-9 && (h - 50.0).abs() < 1e-9);

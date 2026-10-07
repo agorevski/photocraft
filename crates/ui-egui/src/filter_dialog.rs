@@ -192,6 +192,14 @@ pub fn open(app: &mut PhotocraftApp, command: &str) -> Option<u64> {
         };
         fields.insert(p.key, v);
     }
+    if command == "image.rotation.arbitrary"
+        && let Some(ruler) = app.session.active().and_then(|d| d.doc.measurement.ruler.as_ref())
+    {
+        let angle = photocraft_engine::analysis_cmds::ruler_straightening_angle(ruler);
+        if angle.is_finite() {
+            fields.insert("angle".into(), json!(angle));
+        }
+    }
     if parse_spec(spec.params).iter().any(|p| p.kind == Kind::Document) {
         // The document picker lists every open document (params refer to them by index).
         let names: Vec<String> = app.session.documents().iter().map(|d| d.doc.name.clone()).collect();
@@ -453,6 +461,30 @@ mod tests {
         for id in ["filter.pixelate.facet", "filter.pixelate.fragment", "filter.video.ntscColors"] {
             assert!(!has_dialog(id), "{id}");
         }
+    }
+
+    #[test]
+    fn arbitrary_rotation_dialog_prefills_ruler_angle_without_overwriting_edits() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 40, "height": 30})).unwrap();
+
+        let id = open(&mut app, "image.rotation.arbitrary").unwrap();
+        assert_eq!(app.ui.dialogs.iter().find(|d| d.id == id).and_then(|d| d.fields.get("angle")), Some(&json!(0.0)));
+        app.ui.close_dialog(id);
+
+        app.run("image.analysis.rulerTool", json!({"start": [0, 0], "end": [20, 10]})).unwrap();
+        let id = open(&mut app, "image.rotation.arbitrary").unwrap();
+        let dialog = app.ui.dialogs.iter().find(|d| d.id == id).unwrap();
+        let angle = dialog.fields.get("angle").and_then(Value::as_f64).unwrap();
+        assert!((angle + 26.565_051_177_078).abs() < 1e-9);
+        assert_eq!(dialog.fields.get("direction"), Some(&json!("cw")));
+
+        let dialog = app.ui.dialog_mut(id).unwrap();
+        dialog.fields.insert("angle".into(), json!(-12.3));
+        let mut fields = dialog.fields.clone();
+        let ctx = egui::Context::default();
+        ctx.run_ui(Default::default(), |ui| body(ui, &mut fields)).textures_delta.clear();
+        assert!((fields.get("angle").and_then(Value::as_f64).unwrap() + 12.3).abs() < 1e-5);
     }
 
     #[test]
