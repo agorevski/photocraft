@@ -23,8 +23,9 @@ each side so the figure reads at 16–48 px.
 ## Provenance
 
 The owner's original drawing, made in ArtCraft (2880 px, engraving style, keyed to the palette),
-vectorised with craftrules `assets/logo-options/_tools/vectorize_tile.py`. The source PNG stays in
-craftrules at `assets/app-icons/photocraft/source.png`. License: see `LICENSE.txt`.
+was vectorised with an internal helper. The original source PNG and helper are maintained in the
+internal `craftrules` repository, which is not publicly accessible; public contributors can work
+from the licensed SVG masters in this directory. License: see `LICENSE.txt`.
 
 ## Files
 

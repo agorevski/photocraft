@@ -1,8 +1,8 @@
 # Release playbook
 
-The release playbook shared by every crafting app lives in craftrules:
-[`../craftrules/release/playbook.md`](../../craftrules/release/playbook.md)
-(`storytold/craftrules`). It is the canonical copy; don't duplicate it here.
+The cross-app release playbook is maintained in the internal `craftrules` repository, which is
+not publicly accessible. Public contributors should use the PhotoCraft release instructions in
+[`releasing.md`](releasing.md), along with the workflow and packaging files in this repository.
 
-PhotoCraft is its reference implementation (`.github/workflows/release.yml`, `packaging/`,
-`cargo xtask version`). PhotoCraft-specific details are in [releasing.md](releasing.md).
+Maintainers with access to `craftrules` can consult its shared playbook there. This document
+does not require or imply access to that internal repository.

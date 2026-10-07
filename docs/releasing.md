@@ -5,9 +5,9 @@ signed installers for macOS, Windows, Linux and the web, plus a FreeBSD tarball,
 or updates a **draft** GitHub Release named `PhotoCraft v<version>`. Nobody sees a draft until a
 maintainer publishes it.
 
-This is PhotoCraft's implementation of the shared
-[release playbook](release-playbook.md). User-facing names say **PhotoCraft**. Files, binaries
-and ids stay lowercase (`photocraft-<version>-<platform>-<arch>.<ext>`, `ai.storyteller.photocraft`).
+This is PhotoCraft's public release guide; the cross-app playbook is maintained in an internal,
+non-public repository. User-facing names say **PhotoCraft**. Files, binaries and ids stay
+lowercase (`photocraft-<version>-<platform>-<arch>.<ext>`, `ai.storyteller.photocraft`).
 
 ## Cutting a release
 
