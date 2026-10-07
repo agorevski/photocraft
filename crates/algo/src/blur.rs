@@ -5,7 +5,7 @@ use photocraft_raster::Interrupt;
 
 use crate::image::{Edge, Image, premultiply, unpremultiply};
 use crate::photo_util::{par_map, par_rows};
-use crate::{Ctx, FilterParams, RadialMethod};
+use crate::{Ctx, FilterParams, RadialMethod, RadialQuality};
 
 /// Normalized Gaussian kernel with standard deviation `sigma` (radius 3σ).
 pub(crate) fn gaussian_kernel(sigma: f32) -> Vec<f32> {
@@ -310,13 +310,17 @@ pub(crate) fn boxed(src: &Image, out: Rect, ctx: &Ctx, radius: f32) -> Vec<f32> 
     }
 }
 
-fn average_samples(src: &Image, out: Rect, ctx: &Ctx, mut offsets: impl FnMut(f32, f32, &mut Vec<(f32, f32)>)) -> Vec<f32> {
+fn average_samples(src: &Image, out: Rect, ctx: &Ctx, offsets: impl Fn(f32, f32, &mut Vec<(f32, f32)>) + Sync) -> Vec<f32> {
     let n = src.ch;
-    let mut res = Vec::with_capacity(out.width() as usize * out.height() as usize * n);
-    let mut pts = Vec::new();
-    let mut tmp = vec![0.0f32; n];
-    let mut acc = vec![0.0f32; n];
-    for y in out.y0..out.y1 {
+    let (ow, oh) = (out.width() as usize, out.height() as usize);
+    let mut res = vec![0.0; ow * oh * n];
+    if ow == 0 || oh == 0 || n == 0 {
+        return res;
+    }
+    let process_row = |y: i32, row: &mut [f32]| {
+        let mut pts = Vec::new();
+        let mut tmp = vec![0.0f32; n];
+        let mut acc = vec![0.0f32; n];
         for x in out.x0..out.x1 {
             let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
             pts.clear();
@@ -333,17 +337,26 @@ fn average_samples(src: &Image, out: Rect, ctx: &Ctx, mut offsets: impl FnMut(f3
                 }
             }
             let k = 1.0 / pts.len().max(1) as f32;
-            for a in acc.iter_mut() {
-                *a *= k;
+            for (dst, value) in row[(x - out.x0) as usize * n..][..n].iter_mut().zip(&acc) {
+                *dst = *value * k;
             }
             if ctx.alpha {
-                let a = acc[n - 1];
-                for v in acc.iter_mut().take(n - 1) {
-                    *v = if a > 1e-7 { *v / a } else { 0.0 };
+                let alpha = acc[n - 1] * k;
+                let dst = &mut row[(x - out.x0) as usize * n..][..n];
+                for value in dst.iter_mut().take(n - 1) {
+                    *value = if alpha > 1e-7 { *value / alpha } else { 0.0 };
                 }
             }
-            res.extend_from_slice(&acc);
         }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rayon::prelude::*;
+        res.par_chunks_mut(ow * n).enumerate().for_each(|(row, data)| process_row(out.y0 + row as i32, data));
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        res.chunks_mut(ow * n).enumerate().for_each(|(row, data)| process_row(out.y0 + row as i32, data));
     }
     res
 }
@@ -427,17 +440,20 @@ pub(crate) fn motion(src: &Image, out: Rect, ctx: &Ctx, angle: f32, distance: f3
     res
 }
 
-// Preserve near-pixel sampling on large canvases without unbounded per-pixel work.
-const MAX_RADIAL_INTERVALS: usize = 4096;
+fn radial_intervals(path_length: f32, quality: RadialQuality) -> usize {
+    let max = match quality {
+        RadialQuality::Draft => 64,
+        RadialQuality::Good => 256,
+        RadialQuality::Best => 4096,
+    };
 
-fn radial_intervals(path_length: f32) -> usize {
     if path_length.is_nan() {
         return 1;
     }
-    path_length.ceil().clamp(1.0, MAX_RADIAL_INTERVALS as f32) as usize
+    path_length.ceil().clamp(1.0, max as f32) as usize
 }
 
-pub(crate) fn radial(src: &Image, out: Rect, ctx: &Ctx, amount: f32, method: RadialMethod, center: (f32, f32)) -> Vec<f32> {
+pub(crate) fn radial(src: &Image, out: Rect, ctx: &Ctx, amount: f32, method: RadialMethod, quality: RadialQuality, center: (f32, f32)) -> Vec<f32> {
     let b = ctx.bounds;
     let (cx, cy) = (b.x0 as f32 + b.width() as f32 * center.0, b.y0 as f32 + b.height() as f32 * center.1);
     let amount = amount.clamp(0.0, 100.0);
@@ -448,7 +464,7 @@ pub(crate) fn radial(src: &Image, out: Rect, ctx: &Ctx, amount: f32, method: Rad
             RadialMethod::Spin => {
                 // Arc of `amount` degrees centred on the pixel.
                 let arc = amount.to_radians();
-                let n = radial_intervals(arc * r);
+                let n = radial_intervals(arc * r, quality);
                 for i in 0..=n {
                     let t = (i as f32 / n as f32 - 0.5) * arc;
                     let (s, c) = t.sin_cos();
@@ -458,7 +474,7 @@ pub(crate) fn radial(src: &Image, out: Rect, ctx: &Ctx, amount: f32, method: Rad
             RadialMethod::Zoom => {
                 // Samples along the ray, up to amount/2 % closer to the centre.
                 let span = amount / 200.0;
-                let n = radial_intervals(span * r);
+                let n = radial_intervals(span * r, quality);
                 for i in 0..=n {
                     let k = 1.0 - span * i as f32 / n as f32;
                     pts.push((cx + dx * k, cy + dy * k));
@@ -607,10 +623,12 @@ mod tests {
         let (x, y) = (999.5f32, 500.5f32);
         let (dx, dy) = (x - cx, y - cy);
         let arc = 100.0f32.to_radians();
-        let count = radial_intervals(arc * dx.hypot(dy));
-        assert!(count > 64, "large-image radial blur was limited to {count} intervals");
-        assert_eq!(radial_intervals(f32::INFINITY), MAX_RADIAL_INTERVALS);
-        assert_eq!(radial_intervals(f32::NAN), 1);
+        let count = radial_intervals(arc * dx.hypot(dy), RadialQuality::Good);
+        assert_eq!(count, 256);
+        assert_eq!(radial_intervals(f32::INFINITY, RadialQuality::Draft), 64);
+        assert_eq!(radial_intervals(f32::INFINITY, RadialQuality::Good), 256);
+        assert_eq!(radial_intervals(f32::INFINITY, RadialQuality::Best), 4096);
+        assert_eq!(radial_intervals(f32::NAN, RadialQuality::Best), 1);
 
         // Put a small bright patch halfway between two samples from the former 64-interval
         // limit. Dense sampling should pick it up; the coarse path misses it entirely.
@@ -633,7 +651,7 @@ mod tests {
                 pts.push((cx + dx * c - dy * s, cy + dx * s + dy * c));
             }
         };
-        let actual = radial(&img, out, &ctx, 100.0, RadialMethod::Spin, (0.5, 0.5))[0];
+        let actual = radial(&img, out, &ctx, 100.0, RadialMethod::Spin, RadialQuality::Good, (0.5, 0.5))[0];
         let expected = average_samples(&img, out, &ctx, |x, y, pts| sample_path(x, y, pts, 8192))[0];
         let coarse = average_samples(&img, out, &ctx, |x, y, pts| sample_path(x, y, pts, 64))[0];
 
