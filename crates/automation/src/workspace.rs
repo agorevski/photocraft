@@ -501,6 +501,16 @@ mod tests {
         );
         assert!(result.is_err());
 
+        for (id, params) in [
+            ("brush.presets.importAbr", serde_json::json!({"path": "/outside/set.abr"})),
+            ("gradient.presets.importGrd", serde_json::json!({"path": "/outside/set.grd"})),
+            ("plugin.install", serde_json::json!({"path": "/outside/plugin.wasm"})),
+            ("plugin.reload", serde_json::json!({"path": "/outside/plugins"})),
+            ("prefs.set", serde_json::json!({"path": "historyLog.filePath", "value": "/outside/log"})),
+            ("prefs.set", serde_json::json!({"values": {"interface.language": "fr", "historyLog.filePath": "/outside/log"}})),
+        ] {
+            assert!(headless.command_run(id, params).is_err(), "{id}");
+        }
         headless.command_run("file.new", serde_json::json!({"width": 5, "height": 5})).unwrap();
         assert!(headless.session.file_menu.event_log.is_empty());
     }
