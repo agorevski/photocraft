@@ -2384,6 +2384,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn start_screen_shortcut_hints_use_platform_notation() {
+        use egui_kittest::{Harness, kittest::Queryable};
+
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default())
+        });
+        h.run_steps(3);
+
+        let (new_hint, open_hint) = if cfg!(target_os = "macos") { ("⌘N", "⌘O") } else { ("Ctrl+N", "Ctrl+O") };
+        assert!(h.query_by_label_contains(new_hint).is_some(), "New document hint should use {new_hint}");
+        assert!(h.query_by_label_contains(open_hint).is_some(), "Open hint should use {open_hint}");
+        if !cfg!(target_os = "macos") {
+            assert!(h.query_by_label_contains("⌘").is_none(), "non-Mac start screen must not show Mac shortcut symbols");
+        }
+    }
+
+    #[test]
     fn pointer_moves_are_bounded_by_the_press_and_release() {
         use egui::{Event, PointerButton, pos2};
         let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
