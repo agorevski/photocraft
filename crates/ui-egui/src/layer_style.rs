@@ -137,8 +137,12 @@ fn spec(kind: &str) -> &'static [(&'static str, &'static str, P)] {
 
 fn defaults(kind: &str) -> Value {
     match kind {
-        "dropShadow" => json!({"blend": "Multiply", "color": "#000000", "opacity": 75, "angle": 120, "useGlobalLight": true, "distance": 5, "spread": 0, "size": 5, "knocksOut": true}),
-        "innerShadow" => json!({"blend": "Multiply", "color": "#000000", "opacity": 75, "angle": 120, "useGlobalLight": true, "distance": 5, "choke": 0, "size": 5}),
+        "dropShadow" => {
+            json!({"blend": "Multiply", "color": "#000000", "opacity": 75, "angle": 120, "useGlobalLight": true, "distance": 5, "spread": 0, "size": 5, "knocksOut": true})
+        }
+        "innerShadow" => {
+            json!({"blend": "Multiply", "color": "#000000", "opacity": 75, "angle": 120, "useGlobalLight": true, "distance": 5, "choke": 0, "size": 5})
+        }
         "outerGlow" => json!({"blend": "Screen", "opacity": 75, "color": "#ffffbe", "spread": 0, "size": 5, "range": 50}),
         "innerGlow" => json!({"blend": "Screen", "opacity": 75, "color": "#ffffbe", "source": "edge", "choke": 0, "size": 5}),
         "stroke" => json!({"size": 3, "position": "outside", "blend": "Normal", "opacity": 100, "color": "#000000"}),
@@ -147,7 +151,9 @@ fn defaults(kind: &str) -> Value {
             json!({"blend": "Normal", "opacity": 100, "from": "#000000", "to": "#ffffff", "reverse": false, "style": "linear", "angle": 90, "scale": 100})
         }
         "patternOverlay" => json!({"blend": "Normal", "opacity": 100, "pattern": "", "angle": 0, "scale": 100, "link": true}),
-        "bevelEmboss" => json!({"style": "inner", "depth": 100, "direction": "up", "size": 5, "soften": 0, "angle": 120, "useGlobalLight": true, "altitude": 30}),
+        "bevelEmboss" => {
+            json!({"style": "inner", "depth": 100, "direction": "up", "size": 5, "soften": 0, "angle": 120, "useGlobalLight": true, "altitude": 30})
+        }
         "satin" => json!({"blend": "Multiply", "color": "#000000", "opacity": 50, "angle": 19, "distance": 11, "size": 14, "invert": true}),
         _ => json!({}),
     }
@@ -264,6 +270,7 @@ fn values_of(e: &Effect, light: f32) -> Value {
 pub fn initial_fields(layer: &Layer, select: Option<&str>, light: f32) -> Map<String, Value> {
     let mut f = Map::new();
     f.insert("layer".into(), json!(layer.id.0));
+    f.insert("globalLight".into(), json!(light));
     f.insert(
         format!("p:{BLENDING}"),
         json!({"blend": layer.blend.label(), "opacity": (layer.opacity * 100.0).round(), "fillOpacity": (layer.fill_opacity * 100.0).round()}),
@@ -275,7 +282,14 @@ pub fn initial_fields(layer: &Layer, select: Option<&str>, light: f32) -> Map<St
             first = Some(kind);
         }
         f.insert(format!("on:{kind}"), json!(existing.is_some_and(|e| e.enabled())));
-        f.insert(format!("p:{kind}"), existing.map(|e| values_of(e, light)).unwrap_or_else(|| defaults(kind)));
+        let params = existing.map(|e| values_of(e, light)).unwrap_or_else(|| {
+            let mut params = defaults(kind);
+            if params.get("useGlobalLight").and_then(Value::as_bool) == Some(true) {
+                params["angle"] = json!(light);
+            }
+            params
+        });
+        f.insert(format!("p:{kind}"), params);
     }
     let sel = select.or(first).unwrap_or("dropShadow");
     f.insert("selected".into(), json!(sel));
@@ -315,6 +329,7 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
 /// Runs the dialog's commands through `run`: blending options, clear, then each enabled effect.
 fn apply(f: &Map<String, Value>, mut run: impl FnMut(&str, Value) -> Result<Value, String>) -> Result<Value, String> {
     let layer = f.get("layer").cloned().unwrap_or(Value::Null);
+    let initial_light_angle = f.get("globalLight").and_then(Value::as_f64);
     if let Some(Value::Object(bo)) = f.get(&format!("p:{BLENDING}")) {
         let mut p = Value::Object(bo.clone());
         p["layer"] = layer.clone();
@@ -322,14 +337,17 @@ fn apply(f: &Map<String, Value>, mut run: impl FnMut(&str, Value) -> Result<Valu
     }
     let _ = run("layer.layerStyle.clear", json!({"layer": layer}));
     // An effect lit by the global light follows the document's light angle, so the Angle slider
-    // drives that shared angle (as in Photoshop) rather than the per-effect angle the compositor ignores.
+    // drives that shared angle rather than the per-effect angle the compositor ignores.
     let mut light_angle: Option<f64> = None;
     for &(kind, _) in KINDS {
         if f.get(&format!("on:{kind}")).and_then(Value::as_bool) == Some(true) {
             let mut p = f.get(&format!("p:{kind}")).cloned().unwrap_or_else(|| json!({}));
             p["layer"] = layer.clone();
-            if p.get("useGlobalLight").and_then(Value::as_bool) == Some(true) {
-                light_angle = p.get("angle").and_then(Value::as_f64);
+            if p.get("useGlobalLight").and_then(Value::as_bool) == Some(true)
+                && let Some(angle) = p.get("angle").and_then(Value::as_f64)
+                && initial_light_angle.is_none_or(|initial| angle != initial)
+            {
+                light_angle = Some(angle);
             }
             run(&format!("layer.layerStyle.{kind}"), p)?;
         }
@@ -535,6 +553,7 @@ mod tests {
     fn initial_fields_select_requested_kind() {
         let l = Layer::raster("x", photocraft_doc::PixelFormat::RGBA8);
         let f = initial_fields(&l, Some("stroke"), 120.0);
+        assert_eq!(f["globalLight"], json!(120.0));
         assert_eq!(f["selected"], "stroke");
         assert_eq!(f["on:stroke"], true);
         assert_eq!(f["on:dropShadow"], false);
@@ -611,5 +630,44 @@ mod tests {
         let f = initial_fields(st.doc.layer(id).unwrap(), None, st.doc.global_light.angle);
         assert_eq!(f["p:dropShadow"]["useGlobalLight"], json!(true));
         assert_eq!(f["p:dropShadow"]["angle"], json!(30.0));
+    }
+
+    #[test]
+    fn bevel_angle_change_is_not_overridden_by_unchanged_drop_shadow_angle() {
+        let mut s = photocraft_engine::Session::new();
+        s.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
+        s.execute("layer.new.layer", json!({})).unwrap();
+        let (id, mut f, initial_light) = {
+            let st = s.active().unwrap();
+            let id = st.active_layer.unwrap();
+            let f = initial_fields(st.doc.layer(id).unwrap(), None, st.doc.global_light.angle);
+            (id, f, st.doc.global_light.angle)
+        };
+        f.insert("on:bevelEmboss".into(), json!(true));
+        f["p:bevelEmboss"]["angle"] = json!(45.0);
+        f.insert("on:dropShadow".into(), json!(true));
+        assert_eq!(f["p:dropShadow"]["angle"].as_f64(), Some(f64::from(initial_light)));
+
+        apply(&f, |cmd, p| s.execute(cmd, p).map_err(|e| e.to_string())).unwrap();
+
+        assert_eq!(s.active().unwrap().doc.global_light.angle, 45.0);
+        assert_eq!(s.active().unwrap().doc.layer(id).unwrap().effects.items.len(), 2);
+    }
+
+    #[test]
+    fn unchanged_global_light_angle_is_not_applied() {
+        let layer = Layer::raster("x", photocraft_doc::PixelFormat::RGBA8);
+        let mut f = initial_fields(&layer, None, 47.5);
+        f.insert("on:bevelEmboss".into(), json!(true));
+        assert_eq!(f["p:bevelEmboss"]["angle"].as_f64(), Some(47.5));
+        let mut commands = Vec::new();
+
+        apply(&f, |cmd, _| {
+            commands.push(cmd.to_string());
+            Ok(Value::Null)
+        })
+        .unwrap();
+
+        assert!(!commands.iter().any(|cmd| cmd == "layer.layerStyle.globalLight"));
     }
 }
