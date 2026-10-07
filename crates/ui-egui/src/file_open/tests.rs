@@ -79,7 +79,7 @@ fn file_open_dialog_sets_path_so_save_writes_in_place() {
 
 #[test]
 fn file_open_dialog_opens_every_selected_path() {
-    let dir = std::env::current_dir().unwrap().join("target").join(format!("issue-595-open-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photocraft-issue-595-open-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = ["one.psd", "two.png"].map(|name| {
         let path = dir.join(name);
