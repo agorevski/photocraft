@@ -105,6 +105,17 @@ fn metadata_is_read() {
     assert_eq!((d.width, d.height), (20, 16));
 }
 
+#[test]
+fn enormous_double_crop_origin_is_rejected() {
+    let (w, h) = (16, 12);
+    let mut spec = DngSpec::cfa(w, h, vec![1000; w * h]);
+    spec.active_area = Some([2, 3, 10, 14]);
+    spec.default_crop = Some(([0, 0], [11, 8]));
+    spec.default_crop_origin_double = Some([1e300, 0.0]);
+
+    assert!(matches!(decode(&spec.build(), &Limits::default()), Err(RawError::Malformed(_))));
+}
+
 /// Linear sRGB (D65) → XYZ, from the sRGB primaries (IEC 61966-2-1).
 const SRGB_TO_XYZ: [[f64; 3]; 3] = [[0.4124564, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750], [0.0193339, 0.1191920, 0.9503041]];
 
