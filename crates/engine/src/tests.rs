@@ -152,6 +152,18 @@ fn marquee_dragged_past_the_canvas_stops_at_its_edge() {
 }
 
 #[test]
+fn marquee_history_names_match_the_selection_shape() {
+    let mut s = session_with_doc();
+    let history = |s: &mut Session| s.execute("document.inspect", json!({})).unwrap()["history"].clone();
+
+    s.execute("select.rect", json!({"x": 5, "y": 5, "width": 20, "height": 20, "ellipse": true})).unwrap();
+    assert_eq!(history(&mut s).as_array().unwrap().last(), Some(&json!("Elliptical Marquee")));
+
+    s.execute("select.rect", json!({"x": 10, "y": 10, "width": 20, "height": 20})).unwrap();
+    assert_eq!(history(&mut s).as_array().unwrap().last(), Some(&json!("Rectangular Marquee")));
+}
+
+#[test]
 fn selection_modes() {
     let mut s = session_with_doc();
     s.execute("select.rect", json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
